@@ -1,0 +1,148 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug traffic_rule_example.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/traffic_rule/examples/traffic_rule_example.py",
+            "console": "integratedTerminal",
+            "python": "${command:python.interpreterPath}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Debug traffic_rule_simple_test.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/traffic_rule/examples/traffic_rule_simple_test.py",
+            "console": "integratedTerminal",
+            "python": "${command:python.interpreterPath}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Debug mapapi_example.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/map_node/examples/mapapi_example.py",
+            "console": "integratedTerminal",
+            "python": "${command:python.interpreterPath}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Debug load_map_example.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/map_node/examples/load_map_example.py",
+            "console": "integratedTerminal",
+            "python": "${command:python.interpreterPath}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Debug test_local_loader.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/map_node/examples/test_local_loader.py",
+            "console": "integratedTerminal",
+            "python": "${command:python.interpreterPath}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Debug test_integration.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/test/test_integration.py",
+            "console": "integratedTerminal",
+            "python": "${command:python.interpreterPath}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Debug test_loader.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/map_node/test/test_loader.py",
+            "console": "integratedTerminal",
+            "python": "${command:python.interpreterPath}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Debug LocalMap test_local_map.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/common/local_map/test/test_local_map.py",
+            "console": "integratedTerminal",
+            "python": "${command:python.interpreterPath}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Debug LocalMap example_usage.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/common/local_map/test/example_usage.py",
+            "console": "integratedTerminal",
+            "python": "${command:python.interpreterPath}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Debug test_lane_point_conversion.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/map_node/localmap/xodrconvert/test/test_lane_point_conversion.py",
+            "console": "integratedTerminal",
+            "python": "${command:python.interpreterPath}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Debug Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "python": "${command:python.interpreterPath}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

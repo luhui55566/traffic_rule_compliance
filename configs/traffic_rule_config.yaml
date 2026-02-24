@@ -1,0 +1,95 @@
+# Traffic Rule Compliance Verification System Configuration
+# 
+# This configuration file controls the behavior of traffic rule
+# compliance verification system.
+
+# ==================== Map Configuration ====================
+map:
+  # Map format type: "osm" or "xodr"
+  format: "osm"
+  
+  # OSM map file path (relative to config file)
+  osm_file: "maps/Town10HD.osm"
+  
+  # XODR map file path (relative to config file)
+  xodr_file: "maps/Town10HD.xodr"
+  
+  # Map coordinate type: determines how map is loaded (OSM only)
+  # - "local": Map data uses local coordinates (local_x, local_y in meters from OSM tags)
+  #            The loader internally uses Origin(0,0) to preserve original local_x/local_y values
+  #            This prevents Lanelet2 from incorrectly projecting relative lat/lon offsets
+  # - "geographic": Map data uses geographic coordinates (lat, lon in degrees)
+  #            Lanelet2 loads without origin, using lat/lon directly
+  coordinate_type: "local"
+  
+  # Coordinate system: specifies the geographic coordinate system
+  # - Used for reference when converting between coordinate systems
+  # - Common values: "WGS84", "EPSG:4326"
+  # - Note: For "local" coordinate_type, this is informational only
+  coordinate_system: "WGS84"
+  
+  # Map origin: kept for backward compatibility and future use
+  # - NOT used during map loading (coordinate_type determines loading behavior)
+  # - May be used for post-load coordinate transformations if needed
+  origin:
+    latitude: 0.0  # Latitude in degrees (informational only)
+    longitude: 0.0  # Longitude in degrees (informational only)
+ 
+# ==================== Speed Limit Rule ====================
+speed_limit:
+  # Enable/disable speed limit checking
+  enabled: true
+  
+  # Speed tolerance in km/h (vehicle can exceed limit by this amount)
+  tolerance: 5.0
+ 
+# ==================== Continuous Lane Change Rule ====================
+continuous_lane_change:
+  # Enable/disable continuous lane change checking
+  enabled: true
+  
+  # Time window in seconds to count lane changes
+  time_window: 10.0
+  
+  # Maximum allowed lane changes within time window
+  max_changes: 2
+ 
+# ==================== Fishbone Line Rule ====================
+fishbone:
+  # Enable/disable fishbone line deceleration checking
+  enabled: true
+  
+  # Required deceleration in m/s² when approaching fishbone lines
+  required_deceleration: 2.0
+  
+  # Distance in meters to trigger rule
+  trigger_distance: 100.0
+  
+  # Maximum speed in km/h to trigger rule
+  max_speed_to_trigger: 40.0
+ 
+# ==================== Construction Sign Rule ====================
+construction_sign:
+  # Enable/disable construction sign deceleration checking
+  enabled: true
+  
+  # Required deceleration in m/s² when approaching construction signs
+  required_deceleration: 1.5
+  
+  # Distance threshold in meters to check for construction signs
+  distance_threshold: 200.0
+ 
+# ==================== Wrong Way Rule ====================
+wrong_way:
+  # Enable/disable wrong way driving checking
+  enabled: true
+  
+  # Heading tolerance in degrees (vehicle heading can differ from lane direction)
+  heading_tolerance: 45.0
+ 
+# ==================== System Configuration ====================
+# History window in seconds (how much vehicle state history to keep)
+history_window: 10.0 
+ 
+# Enable/disable map query caching
+cache_enabled: true
