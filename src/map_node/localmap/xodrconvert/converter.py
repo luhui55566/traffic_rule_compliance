@@ -168,6 +168,15 @@ class XODRMapConverter:
         """
         Convert XODR roadmark type to LocalMap BoundaryLineShape.
         
+        XODR RoadMark Type 定义:
+        - solid: 单实线
+        - broken: 单虚线
+        - solid solid: 双实线
+        - solid broken: 左实右虚 (从道路中心向外看)
+        - broken solid: 左虚右实
+        - broken broken: 双虚线
+        - botts_dots: 圆点标线
+        
         Args:
             xodr_roadmark_type: XODR roadmark type string
             
@@ -178,8 +187,10 @@ class XODRMapConverter:
             'solid': BoundaryLineShape.SOLID,
             'broken': BoundaryLineShape.DASHED,
             'solid solid': BoundaryLineShape.DOUBLE_SOLID,
-            'solid broken': BoundaryLineShape.SOLID_DASHED,
-            'broken solid': BoundaryLineShape.LEFT_DASHED_RIGHT_SOLID,
+            'solid broken': BoundaryLineShape.LEFT_SOLID_RIGHT_DASHED,  # 左实右虚
+            'broken solid': BoundaryLineShape.LEFT_DASHED_RIGHT_SOLID,  # 左虚右实
+            'broken broken': BoundaryLineShape.DOUBLE_DASHED,           # 双虚线
+            'botts_dots': BoundaryLineShape.DOTTED,                     # 圆点标线
         }
         if isinstance(xodr_roadmark_type, bytes):
             xodr_roadmark_type = xodr_roadmark_type.decode('utf-8')
@@ -192,13 +203,21 @@ class XODRMapConverter:
         """
         Convert XODR roadmark color to LocalMap BoundaryColor.
         
+        OpenDRIVE 标准颜色定义:
+        - standard: 标准颜色（通常为白色，是最常用的默认颜色）
+        - white: 白色
+        - yellow: 黄色（通常用于分隔对向交通）
+        - blue: 蓝色（特殊用途）
+        - red: 红色（特殊用途）
+        
         Args:
-            xodr_color: XODR roadmark color string
+            xodr_color: XODR roadmark color string (may be bytes)
             
         Returns:
             LocalMap BoundaryColor enum
         """
         color_mapping = {
+            'standard': BoundaryColor.WHITE,  # standard = 白色（OpenDRIVE默认）
             'white': BoundaryColor.WHITE,
             'yellow': BoundaryColor.YELLOW,
             'blue': BoundaryColor.BLUE,
@@ -429,6 +448,8 @@ class XODRMapConverter:
             
             # Extract centerline points by taking midpoints of left and right boundary lines
             centerline_points = []
+            centerline_s_values = []  # Track s values for sorting
+            
             if hasattr(odr_road, 'get_lane_border_line'):
                 try:
                     # Get left boundary (outer for left lanes, inner for right lanes)
@@ -471,17 +492,137 @@ class XODRMapConverter:
                             mid_z = (left_pos[2] + right_pos[2]) / 2.0
                             
                             centerline_points.append(Point3D(x=mid_x, y=mid_y, z=mid_z))
+                        
+                        # Estimate s values for sampled points (linear interpolation)
+                        if num_points > 1:
+                            for i in range(num_points):
+                                s_val = lanesection_s0 + (lanesection_send - lanesection_s0) * i / (num_points - 1)
+                                centerline_s_values.append(s_val)
+                        elif num_points == 1:
+                            centerline_s_values.append(lanesection_s0)
+                            
                 except Exception as e:
                     logger.warning(f"Failed to extract centerline for lane {local_lane_id}: {e}")
             
-            # Convert to local coordinates
+            # Add exact endpoints to ensure continuity at road connections
+            # Calculate the centerline position at s_start and s_end using lane border lines
+            if hasattr(odr_road, 'get_lane_border_line'):
+                try:
+                    # Get left and right boundaries at s_start (single point)
+                    # Use a very small eps to get just the start point
+                    tiny_eps = 0.01
+                    
+                    left_start = odr_road.get_lane_border_line(
+                        lane=odr_lane,
+                        s_start=lanesection_s0,
+                        s_end=lanesection_s0 + tiny_eps,
+                        eps=tiny_eps,
+                        outer=(lane_id > 0)
+                    )
+                    
+                    right_start = odr_road.get_lane_border_line(
+                        lane=odr_lane,
+                        s_start=lanesection_s0,
+                        s_end=lanesection_s0 + tiny_eps,
+                        eps=tiny_eps,
+                        outer=(lane_id < 0)
+                    )
+                    
+                    # Calculate start point as midpoint
+                    if (left_start and right_start and
+                        hasattr(left_start, 'array') and hasattr(right_start, 'array') and
+                        len(left_start.array) > 0 and len(right_start.array) > 0):
+                        left_pos = left_start.array[0].array
+                        right_pos = right_start.array[0].array
+                        start_point = Point3D(
+                            x=(left_pos[0] + right_pos[0]) / 2.0,
+                            y=(left_pos[1] + right_pos[1]) / 2.0,
+                            z=(left_pos[2] + right_pos[2]) / 2.0
+                        )
+                        
+                        # Add start point if not already present
+                        endpoint_tolerance = 0.5  # meters
+                        start_exists = False
+                        for pt in centerline_points:
+                            dist = ((pt.x - start_point.x)**2 + (pt.y - start_point.y)**2)**0.5
+                            if dist < endpoint_tolerance:
+                                start_exists = True
+                                break
+                        
+                        if not start_exists and centerline_points:
+                            centerline_points.insert(0, start_point)
+                            centerline_s_values.insert(0, lanesection_s0)
+                    
+                    # Get left and right boundaries at s_end (single point)
+                    left_end = odr_road.get_lane_border_line(
+                        lane=odr_lane,
+                        s_start=lanesection_send - tiny_eps,
+                        s_end=lanesection_send,
+                        eps=tiny_eps,
+                        outer=(lane_id > 0)
+                    )
+                    
+                    right_end = odr_road.get_lane_border_line(
+                        lane=odr_lane,
+                        s_start=lanesection_send - tiny_eps,
+                        s_end=lanesection_send,
+                        eps=tiny_eps,
+                        outer=(lane_id < 0)
+                    )
+                    
+                    # Calculate end point as midpoint
+                    if (left_end and right_end and
+                        hasattr(left_end, 'array') and hasattr(right_end, 'array') and
+                        len(left_end.array) > 0 and len(right_end.array) > 0):
+                        left_pos = left_end.array[-1].array
+                        right_pos = right_end.array[-1].array
+                        end_point = Point3D(
+                            x=(left_pos[0] + right_pos[0]) / 2.0,
+                            y=(left_pos[1] + right_pos[1]) / 2.0,
+                            z=(left_pos[2] + right_pos[2]) / 2.0
+                        )
+                        
+                        # Add end point if not already present
+                        endpoint_tolerance = 0.5  # meters
+                        end_exists = False
+                        for pt in centerline_points:
+                            dist = ((pt.x - end_point.x)**2 + (pt.y - end_point.y)**2)**0.5
+                            if dist < endpoint_tolerance:
+                                end_exists = True
+                                break
+                        
+                        if not end_exists and centerline_points:
+                            centerline_points.append(end_point)
+                            centerline_s_values.append(lanesection_send)
+                        
+                except Exception as e:
+                    logger.debug(f"Could not add exact endpoints for lane {local_lane_id}: {e}")
+            
+            # Sort centerline points by s value to ensure proper ordering
+            if len(centerline_points) == len(centerline_s_values) and len(centerline_s_values) > 1:
+                sorted_pairs = sorted(zip(centerline_s_values, centerline_points), key=lambda x: x[0])
+                centerline_points = [pt for _, pt in sorted_pairs]
+            
+            # Convert to local coordinates and filter by distance
             if self.transformer:
                 local_centerline = []
+                map_range_sq = self.config.map_range * self.config.map_range
                 for point in centerline_points:
                     result = self.transformer.global_to_local(point)
                     if result.success:
-                        local_centerline.append(result.point)
+                        # Filter points outside map_range (in local coords, ego is at origin)
+                        dist_sq = result.point.x ** 2 + result.point.y ** 2
+                        if dist_sq <= map_range_sq:
+                            local_centerline.append(result.point)
                 centerline_points = local_centerline
+                
+                # If all points were filtered out, skip this lane
+                if not centerline_points:
+                    return ConversionResult(
+                        success=False,
+                        data=None,
+                        errors=["All centerline points filtered out (outside map_range)"]
+                    )
             
             # Create Lane object
             lane = Lane(
@@ -564,14 +705,22 @@ class XODRMapConverter:
             if not boundary_points:
                 return None
             
-            # Convert to local coordinates
+            # Convert to local coordinates and filter by distance
             if self.transformer:
                 local_boundary = []
+                map_range_sq = self.config.map_range * self.config.map_range
                 for point in boundary_points:
                     result = self.transformer.global_to_local(point)
                     if result.success:
-                        local_boundary.append(result.point)
+                        # Filter points outside map_range (in local coords, ego is at origin)
+                        dist_sq = result.point.x ** 2 + result.point.y ** 2
+                        if dist_sq <= map_range_sq:
+                            local_boundary.append(result.point)
                 boundary_points = local_boundary
+                
+                # If all points were filtered out, return None
+                if not boundary_points:
+                    return None
             
             # Extract roadmark properties using get_roadmarks() and roadmark_groups
             # RoadMark has type, s_start, s_end, width, group_s0
@@ -655,6 +804,21 @@ class XODRMapConverter:
                         boundary_color_segments.append((start_point, self.convert_boundary_color(roadmark_color)))
                         boundary_thickness_segments.append((start_point, roadmark_width))
                         is_virtual_segments.append((start_point, roadmark_type.lower() == 'none'))
+            
+            # If no roadmarks were found (common for junction lanes), provide default VIRTUAL segmented data
+            # This ensures the boundary will be rendered by the visualization code
+            if not boundary_type_segments and boundary_points:
+                # For junction lanes without roadmarks, add a single VIRTUAL segment
+                # Use the first boundary point as the segment start point
+                first_point = boundary_points[0]
+                boundary_type_segments.append((first_point, BoundaryType.VIRTUAL))
+                boundary_line_shape_segments.append((first_point, BoundaryLineShape.UNKNOWN))
+                boundary_color_segments.append((first_point, BoundaryColor.UNKNOWN))
+                boundary_thickness_segments.append((first_point, 0.1))
+                is_virtual_segments.append((first_point, True))
+                
+                logger.debug(f"No roadmarks found for boundary segment (road={road_id}, lane={lane_id}), "
+                           f"using VIRTUAL type for {len(boundary_points)} points (single segment)")
             
             # Generate boundary segment ID
             boundary_suffix = 'outer' if is_outer else 'inner'

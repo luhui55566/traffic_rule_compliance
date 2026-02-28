@@ -81,6 +81,49 @@ class LocalMapConstructor:
         
         return success
     
+    def _is_road_in_range(self, odr_road) -> bool:
+        """
+        Check if any part of road is within map_range of ego position.
+        
+        Args:
+            odr_road: PyRoad object
+            
+        Returns:
+            True if road is within range, False otherwise
+        """
+        ego_x = self.config.ego_x
+        ego_y = self.config.ego_y
+        map_range = self.config.map_range
+        map_range_sq = map_range * map_range  # Use squared distance for efficiency
+        
+        # Sample points along the road at 100m intervals
+        sample_step = 100.0  # Sample every 100 meters
+        road_length = odr_road.length
+        
+        # Check start, middle, and end points
+        for s in [0.0, road_length / 2.0, road_length]:
+            pos = odr_road.get_xyz(s, 0.0, 0.0)
+            dx = pos.array[0] - ego_x
+            dy = pos.array[1] - ego_y
+            dist_sq = dx * dx + dy * dy
+            if dist_sq <= map_range_sq:
+                return True
+        
+        # Sample intermediate points
+        num_samples = int(road_length / sample_step) + 1
+        for i in range(1, num_samples):
+            s = i * sample_step
+            if s >= road_length:
+                break
+            pos = odr_road.get_xyz(s, 0.0, 0.0)
+            dx = pos.array[0] - ego_x
+            dy = pos.array[1] - ego_y
+            dist_sq = dx * dx + dy * dy
+            if dist_sq <= map_range_sq:
+                return True
+        
+        return False
+    
     def process_roads_and_junctions(self) -> None:
         """Process all roads and junctions from the loaded XODR map."""
         if not self.loader.is_loaded():
@@ -90,11 +133,25 @@ class LocalMapConstructor:
         map_data = self.loader.get_map_data()
         odr_map = self.loader.odr_map
         
+        # Log map_range configuration
+        logger.info(f"Configured map_range: {self.config.map_range} meters")
+        logger.info(f"Ego position: ({self.config.ego_x:.2f}, {self.config.ego_y:.2f})")
+        
         logger.info("Processing roads...")
         #allroads = map_data.get_roads()
         #alljunctions = map_data.get_junctions()
-        # Process all roads
+        
+        # Count total and filtered roads
+        total_roads = len(map_data.get_roads())
+        roads_in_range = 0
+        
+        # Process all roads with distance filtering
         for odr_road in map_data.get_roads():
+            # Check if road is within map_range
+            if not self._is_road_in_range(odr_road):
+                continue
+            
+            roads_in_range += 1
             try:
                 # Convert Road object
                 road = self.converter.convert_road_to_road_object(odr_road)
@@ -132,6 +189,11 @@ class LocalMapConstructor:
                 
             except Exception as e:
                 logger.error(f"Error processing road {odr_road.id}: {e}")
+        
+        # Log road filtering statistics
+        roads_filtered = total_roads - roads_in_range
+        logger.info(f"Road filtering: {roads_in_range}/{total_roads} roads in range, "
+                   f"{roads_filtered} roads filtered out")
         
         logger.info("Processing junctions...")
         
@@ -344,8 +406,18 @@ class LocalMapConstructor:
         
         logger.info("Processing traffic signals and objects...")
         
+        # Only process traffic elements from roads that are within map_range
+        # Get filtered road IDs
+        filtered_road_ids = set(self.converter._roads.keys())
+        logger.info(f"Processing traffic elements from {len(filtered_road_ids)} filtered roads")
+        
         # Process each road for traffic elements
         for odr_road in map_data.get_roads():
+            road_id = int(odr_road.id.decode() if isinstance(odr_road.id, bytes) else odr_road.id)
+            
+            # Skip roads that are not in range
+            if road_id not in filtered_road_ids:
+                continue
             road_id = int(odr_road.id.decode() if isinstance(odr_road.id, bytes) else odr_road.id)
             
             # Process traffic signals
@@ -517,6 +589,10 @@ class LocalMapConstructor:
         # Get all roads
         roads = self.converter.get_roads()
         
+        # DEBUG: Track centerline gaps
+        gap_count = 0
+        gap_details = []
+        
         for road_id, road in roads.items():
             # Check if this road has a direct successor (not through junction)
             if road.successor_road_id is not None:
@@ -546,7 +622,29 @@ class LocalMapConstructor:
                                     lane.successor_lane_ids.append(successor_lane_id)
                                 if lane_id not in successor_lane.predecessor_lane_ids:
                                     successor_lane.predecessor_lane_ids.append(lane_id)
+                                
+                                # DEBUG: Check centerline gap between connected lanes
+                                if lane.centerline_points and successor_lane.centerline_points:
+                                    last_point = lane.centerline_points[-1]
+                                    first_point = successor_lane.centerline_points[0]
+                                    gap = ((last_point.x - first_point.x)**2 +
+                                           (last_point.y - first_point.y)**2)**0.5
+                                    if gap > 1.0:  # Gap larger than 1 meter
+                                        gap_count += 1
+                                        if gap_count <= 10:  # Only log first 10 gaps
+                                            gap_details.append(
+                                                f"  Road {road_id} -> {successor_road_id}, "
+                                                f"Lane {lane.original_lane_id}: gap={gap:.2f}m, "
+                                                f"end=({last_point.x:.1f},{last_point.y:.1f}), "
+                                                f"start=({first_point.x:.1f},{first_point.y:.1f})"
+                                            )
                                 break
+        
+        # DEBUG: Log gap information
+        if gap_count > 0:
+            logger.warning(f"DEBUG: Found {gap_count} centerline gaps > 1m at road connections")
+            for detail in gap_details:
+                logger.warning(detail)
         
         logger.info("Direct road-to-road connections processed")
     

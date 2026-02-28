@@ -995,6 +995,7 @@ class LocalMapAPI:
         show_centerlines: bool = True,
         show_traffic_elements: bool = True,
         show_ego_position: bool = True,
+        show_road_ids: bool = True,
         ego_points: Optional[List[Point3D]] = None,
         save_path: Optional[str] = None,
         dpi: int = 100
@@ -1009,6 +1010,7 @@ class LocalMapAPI:
             show_centerlines: 是否显示车道中心线 / Whether to show lane centerlines
             show_traffic_elements: 是否显示交通元素 / Whether to show traffic elements
             show_ego_position: 是否显示自车位置 / Whether to show ego vehicle position
+            show_road_ids: 是否显示Road ID标签 / Whether to show Road ID labels
             ego_points: 自车测试点列表 / List of ego test points to mark
             save_path: 保存路径 / Path to save figure (optional)
             dpi: 保存图片的DPI / DPI for saved figure
@@ -1032,6 +1034,7 @@ class LocalMapAPI:
             show_centerlines=show_centerlines,
             show_traffic_elements=show_traffic_elements,
             show_ego_position=show_ego_position,
+            show_road_ids=show_road_ids,
             ego_points=ego_points,
             save_path=save_path,
             dpi=dpi
