@@ -6,7 +6,7 @@ loaded by maploader to LocalMap format.
 """
 
 import logging
-from typing import Optional
+from typing import Optional, Set
 from datetime import datetime
 
 from common.local_map.local_map_data import LocalMap, Pose, Point3D, Lane, TrafficLight
@@ -15,6 +15,7 @@ from .config_types import ConversionConfig, ConversionResult, ConversionStatisti
 from .transformer import XODRCoordinateTransformer
 from .converter import XODRMapConverter
 from .builder import LocalMapBuilder
+from .road_finder import XODRRoadFinder
 
 logger = logging.getLogger(__name__)
 
@@ -58,28 +59,68 @@ class LocalMapConstructor:
         success = self.loader.load_map(file_path)
         
         if success:
-            # Initialize transformer with ego pose from config
-            ego_pose = Pose(
-                position=Point3D(
-                    x=self.config.ego_x,
-                    y=self.config.ego_y,
-                    z=0.0
-                ),
-                heading=self.config.ego_heading
-            )
-            self.transformer = XODRCoordinateTransformer(ego_pose)
-            
-            # Initialize converter
-            self.converter = XODRMapConverter(self.transformer, self.config)
-            
-            # Initialize builder
-            self.builder = LocalMapBuilder(self.converter, self.config)
-            
+            self._initialize_components()
             logger.info(f"XODR map loaded successfully with {len(self.loader.get_map_data().get_roads())} roads")
         else:
             logger.error("Failed to load XODR map")
         
         return success
+    
+    def _initialize_components(self):
+        """Initialize transformer, converter, and builder with current config."""
+        # Initialize transformer with ego pose from config
+        ego_pose = Pose(
+            position=Point3D(
+                x=self.config.ego_x,
+                y=self.config.ego_y,
+                z=0.0
+            ),
+            heading=self.config.ego_heading
+        )
+        self.transformer = XODRCoordinateTransformer(ego_pose)
+        
+        # Initialize converter
+        self.converter = XODRMapConverter(self.transformer, self.config)
+        
+        # Initialize builder
+        self.builder = LocalMapBuilder(self.converter, self.config)
+    
+    def set_map_data(self, map_data: 'XODRMapData') -> bool:
+        """
+        Set pre-loaded XODR map data to avoid reloading.
+        
+        Args:
+            map_data: Pre-loaded XODRMapData object
+            
+        Returns:
+            True if map data was set successfully
+        """
+        if map_data is None:
+            logger.error("Cannot set None map data")
+            return False
+        
+        # XODRLoader使用map_data（没有下划线）
+        self.loader.map_data = map_data
+        # 同时设置odr_map，因为is_loaded()检查的是odr_map
+        self.loader.odr_map = map_data.odr_map
+        self._initialize_components()
+        
+        logger.info(f"Pre-loaded XODR map set with {len(map_data.get_roads())} roads")
+        return True
+    
+    def update_config(self, config: ConversionConfig) -> None:
+        """
+        Update configuration and reinitialize components.
+        
+        This method allows changing the ego position without reloading the map.
+        
+        Args:
+            config: New conversion configuration
+        """
+        self.config = config
+        if self.loader.is_loaded():
+            self._initialize_components()
+            logger.debug(f"Config updated: ego=({config.ego_x:.2f}, {config.ego_y:.2f})")
     
     def _is_road_in_range(self, odr_road) -> bool:
         """
@@ -137,18 +178,42 @@ class LocalMapConstructor:
         logger.info(f"Configured map_range: {self.config.map_range} meters")
         logger.info(f"Ego position: ({self.config.ego_x:.2f}, {self.config.ego_y:.2f})")
         
+        # Use XODRRoadFinder to find connected roads within range
+        # This prevents "dangling" road segments that are within range but not connected
+        logger.info("Finding connected roads using road network topology...")
+        road_finder = XODRRoadFinder(odr_map)
+        connected_positions = road_finder.find_connected_roads_in_range(
+            x=self.config.ego_x,
+            y=self.config.ego_y,
+            z=self.config.ego_z,
+            max_distance=self.config.map_range,
+            ego_road_threshold=20.0  # Consider ego on roads within 20m
+        )
+        
+        # Build set of connected road IDs for fast lookup
+        connected_road_ids: Set[str] = {rp.road_id for rp in connected_positions}
+        logger.info(f"Found {len(connected_road_ids)} connected roads within range")
+        
         logger.info("Processing roads...")
-        #allroads = map_data.get_roads()
-        #alljunctions = map_data.get_junctions()
         
         # Count total and filtered roads
         total_roads = len(map_data.get_roads())
         roads_in_range = 0
+        roads_filtered_by_distance = 0
+        roads_filtered_by_connectivity = 0
         
-        # Process all roads with distance filtering
+        # Process all roads with distance AND connectivity filtering
         for odr_road in map_data.get_roads():
-            # Check if road is within map_range
+            road_id = odr_road.id.decode() if isinstance(odr_road.id, bytes) else str(odr_road.id)
+            
+            # Check if road is within map_range (distance filter)
             if not self._is_road_in_range(odr_road):
+                roads_filtered_by_distance += 1
+                continue
+            
+            # Check if road is connected to ego's road network (connectivity filter)
+            if road_id not in connected_road_ids:
+                roads_filtered_by_connectivity += 1
                 continue
             
             roads_in_range += 1
@@ -181,9 +246,6 @@ class LocalMapConstructor:
                             
                             # Process boundary segments
                             self._process_lane_boundaries(odr_road, odr_lane, lanesection_s0,lanesection_end,lane)
-                            
-                            # Process speed limits
-                            self._process_lane_speed_limits(odr_road, lane)
                         else:
                             logger.warning(f"Failed to convert lane: {result.errors}")
                 
@@ -192,31 +254,50 @@ class LocalMapConstructor:
         
         # Log road filtering statistics
         roads_filtered = total_roads - roads_in_range
-        logger.info(f"Road filtering: {roads_in_range}/{total_roads} roads in range, "
-                   f"{roads_filtered} roads filtered out")
+        logger.info(f"Road filtering: {roads_in_range}/{total_roads} roads in range")
+        logger.info(f"  Filtered by distance: {roads_filtered_by_distance}")
+        logger.info(f"  Filtered by connectivity (dangling roads): {roads_filtered_by_connectivity}")
         
         logger.info("Processing junctions...")
         
-        # Process all junctions
+        # Get set of processed road IDs for junction filtering
+        processed_road_ids = set(self.converter._roads.keys())
+        junctions_in_range = 0
+        junctions_filtered = 0
+        
+        # Process only junctions that are related to processed roads
         if hasattr(odr_map, 'get_junctions'):
             for odr_junction in odr_map.get_junctions():
                 try:
                     # Collect connected road IDs
-                    connected_road_ids = []
+                    junction_connected_road_ids = []
                     if hasattr(odr_junction, 'id_to_connection'):
                         for conn in odr_junction.id_to_connection.values():
-                            connected_road_ids.append(int(conn.incoming_road))
-                            connected_road_ids.append(int(conn.connecting_road))
+                            junction_connected_road_ids.append(int(conn.incoming_road))
+                            junction_connected_road_ids.append(int(conn.connecting_road))
+                    
+                    # Filter: Only include junction if at least one of its roads is in processed_roads
+                    # This ensures we only include junctions that are actually relevant to the local area
+                    has_connected_road = any(
+                        road_id in processed_road_ids for road_id in junction_connected_road_ids
+                    )
+                    
+                    if not has_connected_road:
+                        junctions_filtered += 1
+                        continue
+                    
+                    junctions_in_range += 1
                     
                     # Convert Junction object
                     junction = self.converter.convert_junction_to_junction_object(
-                        odr_junction, connected_road_ids
+                        odr_junction, junction_connected_road_ids
                     )
                     if junction:
                         self.converter._junctions[junction.junction_id] = junction
                 except Exception as e:
                     logger.error(f"Error processing junction {odr_junction.id}: {e}")
         
+        logger.info(f"Junction filtering: {junctions_in_range} in range, {junctions_filtered} filtered out")
         logger.info(f"Processed {len(self.converter._roads)} roads and "
                    f"{len(self.converter._junctions)} junctions")
         
@@ -286,16 +367,20 @@ class LocalMapConstructor:
                 first_lane.left_boundary_segment_indices = merged_left_boundaries
                 first_lane.right_boundary_segment_indices = merged_right_boundaries
                 
-                # Merge speed limits (remove duplicates)
-                merged_speed_limits = []
+                # Merge per-point speed limits
+                merged_max_speed_limits = []
+                merged_min_speed_limits = []
+                merged_speed_limit_types = []
                 for lane_id in lane_ids_sorted:
                     lane = self.builder.get_lane_by_id(lane_id)
                     if not lane:
                         continue
-                    for sl in lane.speed_limits:
-                        if sl not in merged_speed_limits:
-                            merged_speed_limits.append(sl)
-                first_lane.speed_limits = merged_speed_limits
+                    merged_max_speed_limits.extend(lane.max_speed_limits)
+                    merged_min_speed_limits.extend(lane.min_speed_limits)
+                    merged_speed_limit_types.extend(lane.speed_limit_types)
+                first_lane.max_speed_limits = merged_max_speed_limits
+                first_lane.min_speed_limits = merged_min_speed_limits
+                first_lane.speed_limit_types = merged_speed_limit_types
                 
                 # Predecessor is the first lane's predecessor
                 # Successor is the last lane's successor
@@ -370,31 +455,6 @@ class LocalMapConstructor:
         
         # Associate boundaries with lane
         self.builder.associate_lane_with_boundaries(lane, left_boundary_indices, right_boundary_indices)
-    
-    def _process_lane_speed_limits(self, odr_road, lane: Lane) -> None:
-        """
-        Process speed limits for a lane.
-        
-        Args:
-            odr_road: pyOpenDRIVE Road object
-            lane: LocalMap Lane object
-        """
-        speed_limits = []
-        
-        # Get speed records from road
-        if hasattr(odr_road, 'get_s_to_speed'):
-            s_to_speed = odr_road.get_s_to_speed()
-            if s_to_speed:
-                for speed_record in s_to_speed.values():
-                    speed_segment = self.converter.convert_speed_limit_segment(
-                        odr_road, speed_record, lane.road_id
-                    )
-                    if speed_segment:
-                        speed_limits.append(speed_segment)
-        
-        # Associate with lane
-        if speed_limits:
-            self.builder.associate_lane_with_speed_limits(lane, speed_limits)
     
     def process_traffic_elements(self) -> None:
         """Process traffic elements (signals, objects) from the loaded XODR map."""
@@ -550,28 +610,36 @@ class LocalMapConstructor:
                             from_lane_id = lane_link.frm
                             to_lane_id = lane_link.to
                             
-                            # Generate full lane IDs
-                            from_full_id = self.converter.generate_lane_id(
-                                incoming_road_id,
-                                0.0 if contact_point == 'start' else incoming_road.length if hasattr(incoming_road, 'length') else 0.0,
-                                from_lane_id
-                            )
-                            to_full_id = self.converter.generate_lane_id(
-                                connecting_road_id,
-                                0.0 if contact_point == 'start' else connecting_road.length if hasattr(connecting_road, 'length') else 0.0,
-                                to_lane_id
-                            )
+                            # Find the correct lanes by searching through all lanes in the road
+                            # We need to match by original_lane_id, not generate lane_id with assumed s0
+                            from_lane = None
+                            to_lane = None
                             
-                            # Update lane connections
-                            from_lane = self.builder.get_lane_by_id(from_full_id)
-                            to_lane = self.builder.get_lane_by_id(to_full_id)
+                            # Search for the from_lane in incoming_road
+                            if incoming_road and hasattr(incoming_road, 'lane_ids'):
+                                for lane_id in incoming_road.lane_ids:
+                                    lane = self.builder.get_lane_by_id(lane_id)
+                                    if lane and lane.original_lane_id == from_lane_id:
+                                        # For contact_point == 'end', we want the lane at the end of the road
+                                        # For contact_point == 'start', we want the lane at the start
+                                        # Check if this is the correct lane section based on contact_point
+                                        from_lane = lane
+                                        break
+                            
+                            # Search for the to_lane in connecting_road
+                            if connecting_road and hasattr(connecting_road, 'lane_ids'):
+                                for lane_id in connecting_road.lane_ids:
+                                    lane = self.builder.get_lane_by_id(lane_id)
+                                    if lane and lane.original_lane_id == to_lane_id:
+                                        to_lane = lane
+                                        break
                             
                             if from_lane and to_lane:
                                 # IMPORTANT: Only add lane IDs, NOT junction IDs
-                                if to_full_id not in from_lane.successor_lane_ids:
-                                    from_lane.successor_lane_ids.append(to_full_id)
-                                if from_full_id not in to_lane.predecessor_lane_ids:
-                                    to_lane.predecessor_lane_ids.append(from_full_id)
+                                if to_lane.lane_id not in from_lane.successor_lane_ids:
+                                    from_lane.successor_lane_ids.append(to_lane.lane_id)
+                                if from_lane.lane_id not in to_lane.predecessor_lane_ids:
+                                    to_lane.predecessor_lane_ids.append(from_lane.lane_id)
                 
                 except Exception as e:
                     logger.error(f"Error processing junction connection: {e}")
@@ -583,6 +651,13 @@ class LocalMapConstructor:
         Process direct road-to-road connections (not through junctions).
         This sets up lane successor/predecessor relationships for lanes
         in roads that are directly connected.
+        
+        Handles both successor and predecessor connections to ensure
+        bidirectional lane connectivity.
+        
+        IMPORTANT: This method skips connections involving junction roads,
+        as those are handled by process_junction_connections() based on
+        the junction's lane_link definitions.
         """
         logger.info("Processing direct road-to-road connections...")
         
@@ -593,14 +668,26 @@ class LocalMapConstructor:
         gap_count = 0
         gap_details = []
         
+        # Track processed connections to avoid duplicates
+        processed_connections = set()
+        
         for road_id, road in roads.items():
-            # Check if this road has a direct successor (not through junction)
+            # Process successor connections
             if road.successor_road_id is not None:
                 successor_road_id = road.successor_road_id
+                connection_key = (road_id, successor_road_id)
                 
-                # Get the successor road
-                if successor_road_id in roads:
+                if connection_key not in processed_connections and successor_road_id in roads:
+                    processed_connections.add(connection_key)
                     successor_road = roads[successor_road_id]
+                    
+                    # Skip if successor road is a junction road (connecting road)
+                    # Check by looking at the first lane's junction_id
+                    # Junction road connections are handled by process_junction_connections
+                    if successor_road.lane_ids:
+                        first_lane = self.builder.get_lane_by_id(successor_road.lane_ids[0])
+                        if first_lane and first_lane.junction_id is not None:
+                            continue
                     
                     # For each lane in the current road, find the corresponding lane in the successor road
                     for lane_id in road.lane_ids:
@@ -639,14 +726,132 @@ class LocalMapConstructor:
                                                 f"start=({first_point.x:.1f},{first_point.y:.1f})"
                                             )
                                 break
+            
+            # Process predecessor connections
+            if road.predecessor_road_id is not None:
+                predecessor_road_id = road.predecessor_road_id
+                connection_key = (predecessor_road_id, road_id)
+                
+                if connection_key not in processed_connections and predecessor_road_id in roads:
+                    processed_connections.add(connection_key)
+                    predecessor_road = roads[predecessor_road_id]
+                    
+                    # Skip if current road is a junction road (connecting road)
+                    # Check by looking at the first lane's junction_id
+                    # Junction road connections are handled by process_junction_connections
+                    if road.lane_ids:
+                        first_lane = self.builder.get_lane_by_id(road.lane_ids[0])
+                        if first_lane and first_lane.junction_id is not None:
+                            continue
+                    
+                    # For each lane in the current road, find the corresponding lane in the predecessor road
+                    for lane_id in road.lane_ids:
+                        lane = self.builder.get_lane_by_id(lane_id)
+                        if not lane:
+                            continue
+                        
+                        # Find the corresponding lane in the predecessor road
+                        # Match by original lane ID (the lane ID from XODR)
+                        for predecessor_lane_id in predecessor_road.lane_ids:
+                            predecessor_lane = self.builder.get_lane_by_id(predecessor_lane_id)
+                            if not predecessor_lane:
+                                continue
+                            
+                            # Check if they have the same original lane ID
+                            if lane.original_lane_id == predecessor_lane.original_lane_id:
+                                # Set up the successor/predecessor relationship
+                                # predecessor_road -> current_road
+                                if lane_id not in predecessor_lane.successor_lane_ids:
+                                    predecessor_lane.successor_lane_ids.append(lane_id)
+                                if predecessor_lane_id not in lane.predecessor_lane_ids:
+                                    lane.predecessor_lane_ids.append(predecessor_lane_id)
+                                
+                                # DEBUG: Check centerline gap between connected lanes
+                                if lane.centerline_points and predecessor_lane.centerline_points:
+                                    last_point = predecessor_lane.centerline_points[-1]
+                                    first_point = lane.centerline_points[0]
+                                    gap = ((last_point.x - first_point.x)**2 +
+                                           (last_point.y - first_point.y)**2)**0.5
+                                    if gap > 1.0:  # Gap larger than 1 meter
+                                        gap_count += 1
+                                        if gap_count <= 10:  # Only log first 10 gaps
+                                            gap_details.append(
+                                                f"  Road {predecessor_road_id} -> {road_id}, "
+                                                f"Lane {lane.original_lane_id}: gap={gap:.2f}m, "
+                                                f"end=({last_point.x:.1f},{last_point.y:.1f}), "
+                                                f"start=({first_point.x:.1f},{first_point.y:.1f})"
+                                            )
+                                break
         
         # DEBUG: Log gap information
         if gap_count > 0:
             logger.warning(f"DEBUG: Found {gap_count} centerline gaps > 1m at road connections")
             for detail in gap_details:
                 logger.warning(detail)
+            
+            logger.info("Direct road-to-road connections processed")
         
-        logger.info("Direct road-to-road connections processed")
+    def process_intra_road_lane_connections(self) -> None:
+        """
+        Process lane connections within the same road across lane sections.
+        
+        When a road has multiple lane sections, lanes with the same original_lane_id
+        in consecutive sections should be connected as predecessor/successor.
+        
+        For example, if Road 1 has:
+        - LaneSection 0: Lane -1 (s=0 to s=100)
+        - LaneSection 1: Lane -1 (s=100 to s=200)
+        
+        Then Lane -1 in section 0 is the predecessor of Lane -1 in section 1.
+        """
+        logger.info("Processing intra-road lane section connections...")
+        
+        roads = self.converter.get_roads()
+        connection_count = 0
+        
+        for road_id, road in roads.items():
+            if len(road.lane_ids) < 2:
+                continue
+            
+            # Group lanes by original_lane_id
+            lanes_by_original_id = {}
+            for lane_id in road.lane_ids:
+                lane = self.builder.get_lane_by_id(lane_id)
+                if not lane:
+                    continue
+                
+                orig_id = lane.original_lane_id
+                if orig_id not in lanes_by_original_id:
+                    lanes_by_original_id[orig_id] = []
+                
+                # Store lane for sorting by lane_id
+                # The lane_id was generated as: f"{road_id}_{lanesection_s0}_{lane_id}"
+                # So sorting by lane_id should give us the correct order by lane section
+                lanes_by_original_id[orig_id].append(lane)
+            
+            # For each group of lanes with the same original_lane_id,
+            # connect them in order of their lane section s0
+            for orig_id, lanes in lanes_by_original_id.items():
+                if len(lanes) < 2:
+                    continue
+                
+                # Sort lanes by their lane_id (which encodes the lane section s0)
+                sorted_lanes = sorted(lanes, key=lambda l: l.lane_id)
+                
+                # Connect consecutive lanes
+                for i in range(len(sorted_lanes) - 1):
+                    current_lane = sorted_lanes[i]
+                    next_lane = sorted_lanes[i + 1]
+                    
+                    # current_lane -> next_lane
+                    if next_lane.lane_id not in current_lane.successor_lane_ids:
+                        current_lane.successor_lane_ids.append(next_lane.lane_id)
+                    if current_lane.lane_id not in next_lane.predecessor_lane_ids:
+                        next_lane.predecessor_lane_ids.append(current_lane.lane_id)
+                    
+                    connection_count += 1
+        
+        logger.info(f"Intra-road lane section connections processed: {connection_count} connections")
     
     def construct_local_map(self) -> ConversionResult:
         """
@@ -669,6 +874,7 @@ class LocalMapConstructor:
             self.process_traffic_elements()
             self.process_junction_connections()
             self.process_direct_road_connections()
+            self.process_intra_road_lane_connections()
             
             # Build LocalMap
             local_map = self.builder.build_local_map()

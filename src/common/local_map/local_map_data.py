@@ -319,14 +319,16 @@ class LaneBoundarySegment:
     # 边界点集（边界线中心点）/ Boundary point set (center points of boundary line)
     boundary_points: List[Point3D]         # 边界点列表 / Boundary point list
     
-    # 分段边界支持 / Segmented Boundary Support:
-    # - 使用绝对坐标数组来支持多个边界子段
-    # - Use absolute coordinate arrays to support multiple boundary sub-segments
-    boundary_type_segments: List[Tuple[Point3D, BoundaryType]] = field(default_factory=list)  # [(起点坐标, 边界类型), ...] / [(start point, boundary type), ...]
-    boundary_line_shape_segments: List[Tuple[Point3D, BoundaryLineShape]] = field(default_factory=list)  # [(起点坐标, 边界线形状), ...] / [(start point, boundary line shape), ...]
-    boundary_color_segments: List[Tuple[Point3D, BoundaryColor]] = field(default_factory=list)  # [(起点坐标, 边界颜色), ...] / [(start point, boundary color), ...]
-    boundary_thickness_segments: List[Tuple[Point3D, float]] = field(default_factory=list)  # [(起点坐标, 边界线宽度), ...] / [(start point, boundary thickness), ...]
-    is_virtual_segments: List[Tuple[Point3D, bool]] = field(default_factory=list)  # [(起点坐标, 是否虚拟边界), ...] / [(start point, is virtual), ...]
+    # 逐点边界属性 / Per-Point Boundary Attributes:
+    # - 每个列表与boundary_points一一对应，相同索引的值对应相同的点
+    # - Each list corresponds 1:1 with boundary_points, same index means same point
+    # - 避免后续查询计算范围，直接通过索引访问
+    # - Avoid range queries, access directly by index
+    boundary_types: List[BoundaryType] = field(default_factory=list)  # 每个点的边界类型 / Boundary type for each point
+    boundary_line_shapes: List[BoundaryLineShape] = field(default_factory=list)  # 每个点的边界线形状 / Boundary line shape for each point
+    boundary_colors: List[BoundaryColor] = field(default_factory=list)  # 每个点的边界颜色 / Boundary color for each point
+    boundary_thicknesses: List[float] = field(default_factory=list)  # 每个点的边界线宽度(m) / Boundary thickness(m) for each point
+    is_virtuals: List[bool] = field(default_factory=list)  # 每个点是否虚拟边界 / Whether virtual boundary for each point
 
 
 @dataclass
@@ -383,8 +385,12 @@ class Lane:
     left_boundary_segment_indices: List[int] = field(default_factory=list)  # 左边界分段索引列表 / Left boundary segment index list
     right_boundary_segment_indices: List[int] = field(default_factory=list) # 右边界分段索引列表 / Right boundary segment index list
     
-    # 限速定义（分段）/ Speed limit definition (segmented)
-    speed_limits: List[SpeedLimitSegment] = field(default_factory=list) # 限速分段列表 / Speed limit segment list
+    # 限速定义（逐点，与centerline_points一一对应）/ Speed limit definition (per-point, 1:1 with centerline_points)
+    # 每个列表与centerline_points一一对应，相同索引的值对应相同的点
+    # Each list corresponds 1:1 with centerline_points, same index means same point
+    max_speed_limits: List[float] = field(default_factory=list)  # 每个点的最高限速值(m/s) / Max speed limit (m/s) for each point
+    min_speed_limits: List[float] = field(default_factory=list)  # 每个点的最低限速值(m/s) / Min speed limit (m/s) for each point
+    speed_limit_types: List[SpeedLimitType] = field(default_factory=list)  # 每个点的限速类型 / Speed limit type for each point
     
     # 关联元素ID列表 / Associated element ID lists (参考Apollo / Reference Apollo)
     associated_traffic_light_ids: List[int] = field(default_factory=list)      # 关联的信号灯ID / Associated traffic light IDs

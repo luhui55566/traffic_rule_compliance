@@ -37,7 +37,7 @@ def test_lane_point_conversion(prefer_junction: bool = False):
     """
 
     # Configuration
-    xodr_file = "configs/maps/lgdd.xodr"
+    xodr_file = "configs/maps/lgdd.xodr"#lgdd Town10HD
     output_dir = Path(__file__).parent / "output"
     output_dir.mkdir(exist_ok=True)
 
@@ -154,7 +154,7 @@ def test_lane_point_conversion(prefer_junction: bool = False):
     # Create conversion configuration with selected ego position
     config = ConversionConfig(
         eps=1,  # 10cm sampling resolution
-        map_range=300.0,  # 300m map range
+        map_range=100.0,  # 300m map range
         include_junction_lanes=True,
         include_road_objects=True,
         include_traffic_signals=True,
@@ -250,9 +250,9 @@ def test_lane_point_conversion(prefer_junction: bool = False):
     
     for i, segment in enumerate(local_map.boundary_segments):
         has_points = len(segment.boundary_points) > 0
-        has_color = bool(segment.boundary_color_segments)
-        has_shape = bool(segment.boundary_line_shape_segments)
-        has_thickness = bool(segment.boundary_thickness_segments)
+        has_color = bool(segment.boundary_colors)
+        has_shape = bool(segment.boundary_line_shapes)
+        has_thickness = bool(segment.boundary_thicknesses)
         
         if has_points:
             if has_color and has_shape and has_thickness:
@@ -260,14 +260,14 @@ def test_lane_point_conversion(prefer_junction: bool = False):
             elif has_color or has_shape or has_thickness:
                 segments_with_partial_data += 1
                 print(f"  Segment {i}: PARTIAL DATA - points={len(segment.boundary_points)}, "
-                      f"color={len(segment.boundary_color_segments)}, "
-                      f"shape={len(segment.boundary_line_shape_segments)}, "
-                      f"thickness={len(segment.boundary_thickness_segments)}")
+                      f"color={len(segment.boundary_colors)}, "
+                      f"shape={len(segment.boundary_line_shapes)}, "
+                      f"thickness={len(segment.boundary_thicknesses)}")
             else:
                 segments_with_no_segmented_data += 1
                 segments_with_points_but_no_data += 1
                 if segments_with_points_but_no_data <= 10:  # Only print first 10
-                    print(f"  Segment {i}: HAS POINTS ({len(segment.boundary_points)}) BUT NO SEGMENTED DATA - WILL BE SKIPPED IN VISUALIZATION!")
+                    print(f"  Segment {i}: HAS POINTS ({len(segment.boundary_points)}) BUT NO PER-POINT DATA - WILL BE SKIPPED IN VISUALIZATION!")
     
     print(f"\nBoundary Segment Summary:")
     print(f"  Segments with full segmented data: {segments_with_full_data}")
@@ -295,21 +295,155 @@ def test_lane_point_conversion(prefer_junction: bool = False):
     for segment in local_map.boundary_segments:
         if segment.segment_id in junction_boundary_segment_ids:
             segments_found += 1
-            has_data = (segment.boundary_color_segments and
-                       segment.boundary_line_shape_segments and
-                       segment.boundary_thickness_segments)
+            has_data = (segment.boundary_colors and
+                       segment.boundary_line_shapes and
+                       segment.boundary_thicknesses)
             if not has_data:
                 segments_missing_data += 1
                 if segments_missing_data <= 5:
                     print(f"  Junction boundary segment {segment.segment_id}: "
                           f"points={len(segment.boundary_points)}, "
-                          f"color_segs={len(segment.boundary_color_segments) if segment.boundary_color_segments else 0}, "
-                          f"shape_segs={len(segment.boundary_line_shape_segments) if segment.boundary_line_shape_segments else 0}, "
-                          f"thickness_segs={len(segment.boundary_thickness_segments) if segment.boundary_thickness_segments else 0}")
+                          f"colors={len(segment.boundary_colors) if segment.boundary_colors else 0}, "
+                          f"shapes={len(segment.boundary_line_shapes) if segment.boundary_line_shapes else 0}, "
+                          f"thicknesses={len(segment.boundary_thicknesses) if segment.boundary_thicknesses else 0}")
     
     print(f"\nJunction boundary segments found: {segments_found}")
     print(f"Junction boundary segments MISSING segmented data: {segments_missing_data}")
     # === END NEW DIAGNOSTIC ===
+
+    # === DIAGNOSTIC: Speed Limit Data ===
+    print("\n" + "=" * 60)
+    print("DIAGNOSTIC: Checking per-point speed limit data")
+    print("=" * 60)
+    
+    lanes_with_speed_limits = 0
+    lanes_without_speed_limits = 0
+    total_points_with_speed = 0
+    total_points_without_speed = 0
+    sample_speed_data = []
+    
+    for lane in local_map.lanes:
+        has_speed_limits = len(lane.max_speed_limits) > 0
+        if has_speed_limits:
+            lanes_with_speed_limits += 1
+            total_points_with_speed += len(lane.max_speed_limits)
+            # Collect sample data (first 3 lanes with speed limits)
+            if len(sample_speed_data) < 3:
+                # Get unique speed values
+                unique_speeds = set(lane.max_speed_limits)
+                sample_speed_data.append({
+                    'lane_id': lane.lane_id,
+                    'road_id': lane.road_id,
+                    'centerline_points': len(lane.centerline_points),
+                    'speed_points': len(lane.max_speed_limits),
+                    'unique_max_speeds': sorted([f"{s:.1f}" for s in unique_speeds if s > 0]),
+                    'has_min_speeds': any(s > 0 for s in lane.min_speed_limits)
+                })
+        else:
+            lanes_without_speed_limits += 1
+            total_points_without_speed += len(lane.centerline_points)
+    
+    print(f"Lanes with speed limits: {lanes_with_speed_limits}")
+    print(f"Lanes without speed limits: {lanes_without_speed_limits}")
+    print(f"Total centerline points with speed data: {total_points_with_speed}")
+    print(f"Total centerline points without speed data: {total_points_without_speed}")
+    
+    if sample_speed_data:
+        print("\nSample lanes with speed limit data:")
+        for i, data in enumerate(sample_speed_data):
+            print(f"  Sample {i+1}: Lane {data['lane_id']} (Road {data['road_id']})")
+            print(f"    Centerline points: {data['centerline_points']}")
+            print(f"    Speed limit points: {data['speed_points']}")
+            print(f"    Unique max speeds (m/s): {data['unique_max_speeds']}")
+            print(f"    Has min speeds: {data['has_min_speeds']}")
+    # === END DIAGNOSTIC: Speed Limit Data ===
+
+    # === DIAGNOSTIC: Lane Predecessor/Successor Connections ===
+    print("\n" + "=" * 60)
+    print("DIAGNOSTIC: Checking lane predecessor/successor connections")
+    print("=" * 60)
+    
+    lanes_with_predecessors = 0
+    lanes_with_successors = 0
+    lanes_with_both = 0
+    lanes_with_neither = 0
+    total_predecessor_connections = 0
+    total_successor_connections = 0
+    
+    # Sample lanes with connections
+    sample_connected_lanes = []
+    sample_unconnected_lanes = []
+    
+    for lane in local_map.lanes:
+        has_pred = len(lane.predecessor_lane_ids) > 0
+        has_succ = len(lane.successor_lane_ids) > 0
+        
+        total_predecessor_connections += len(lane.predecessor_lane_ids)
+        total_successor_connections += len(lane.successor_lane_ids)
+        
+        if has_pred:
+            lanes_with_predecessors += 1
+        if has_succ:
+            lanes_with_successors += 1
+        if has_pred and has_succ:
+            lanes_with_both += 1
+        if not has_pred and not has_succ:
+            lanes_with_neither += 1
+        
+        # Collect samples
+        if has_pred or has_succ:
+            if len(sample_connected_lanes) < 5:
+                sample_connected_lanes.append({
+                    'lane_id': lane.lane_id,
+                    'road_id': lane.road_id,
+                    'original_lane_id': lane.original_lane_id,
+                    'predecessor_ids': lane.predecessor_lane_ids,
+                    'successor_ids': lane.successor_lane_ids,
+                    'is_junction': lane.junction_id is not None
+                })
+        else:
+            if len(sample_unconnected_lanes) < 5 and lane.junction_id is None:
+                sample_unconnected_lanes.append({
+                    'lane_id': lane.lane_id,
+                    'road_id': lane.road_id,
+                    'original_lane_id': lane.original_lane_id,
+                    'is_junction': lane.junction_id is not None
+                })
+    
+    print(f"Lane connection statistics:")
+    print(f"  Total lanes: {len(local_map.lanes)}")
+    print(f"  Lanes with predecessors: {lanes_with_predecessors}")
+    print(f"  Lanes with successors: {lanes_with_successors}")
+    print(f"  Lanes with both: {lanes_with_both}")
+    print(f"  Lanes with neither: {lanes_with_neither}")
+    print(f"  Total predecessor connections: {total_predecessor_connections}")
+    print(f"  Total successor connections: {total_successor_connections}")
+    
+    if sample_connected_lanes:
+        print("\nSample connected lanes (first 5):")
+        for data in sample_connected_lanes:
+            print(f"  Lane {data['lane_id']} (Road {data['road_id']}, orig_id={data['original_lane_id']}):")
+            print(f"    Predecessors: {data['predecessor_ids']}")
+            print(f"    Successors: {data['successor_ids']}")
+            print(f"    Is junction: {data['is_junction']}")
+    
+    if sample_unconnected_lanes:
+        print("\nSample unconnected lanes (first 5 non-junction):")
+        for data in sample_unconnected_lanes:
+            print(f"  Lane {data['lane_id']} (Road {data['road_id']}, orig_id={data['original_lane_id']}):")
+            print(f"    Is junction: {data['is_junction']}")
+    
+    # Check road-level predecessor/successor info
+    print("\nRoad-level connections:")
+    roads_with_pred = sum(1 for r in local_map.roads if r.predecessor_road_id is not None)
+    roads_with_succ = sum(1 for r in local_map.roads if r.successor_road_id is not None)
+    roads_with_pred_junction = sum(1 for r in local_map.roads if r.predecessor_junction_id is not None)
+    roads_with_succ_junction = sum(1 for r in local_map.roads if r.successor_junction_id is not None)
+    print(f"  Roads with predecessor_road_id: {roads_with_pred}")
+    print(f"  Roads with successor_road_id: {roads_with_succ}")
+    print(f"  Roads with predecessor_junction_id: {roads_with_pred_junction}")
+    print(f"  Roads with successor_junction_id: {roads_with_succ_junction}")
+    # === END DIAGNOSTIC: Lane Predecessor/Successor Connections ===
 
     # === DIAGNOSTIC LOGS ===
     print("\n" + "=" * 60)

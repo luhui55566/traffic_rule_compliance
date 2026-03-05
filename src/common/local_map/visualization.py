@@ -62,7 +62,9 @@ class LocalMapVisualizer:
         show_traffic_elements: bool = True,
         show_ego_position: bool = True,
         show_road_ids: bool = True,
+        show_lane_ids: bool = True,
         ego_points: Optional[List[Point3D]] = None,
+        trajectory_points: Optional[List[Point3D]] = None,
         save_path: Optional[str] = None,
         dpi: int = 100
     ) -> None:
@@ -77,7 +79,9 @@ class LocalMapVisualizer:
             show_traffic_elements: Whether to show traffic lights and signs
             show_ego_position: Whether to show ego vehicle position
             show_road_ids: Whether to show Road ID labels on each lane
+            show_lane_ids: Whether to show Lane ID labels on each lane (smaller font)
             ego_points: List of ego test points to mark
+            trajectory_points: List of trajectory points to plot as a connected path
             save_path: Path to save figure (optional)
             dpi: DPI for saved figure
         """
@@ -107,9 +111,17 @@ class LocalMapVisualizer:
         if ego_points:
             self._plot_ego_points(ego_points)
 
+        # Plot trajectory
+        if trajectory_points:
+            self._plot_trajectory(trajectory_points)
+
         # Plot Road ID labels
         if show_road_ids:
             self._plot_road_ids(local_map)
+        
+        # Plot Lane ID labels
+        if show_lane_ids:
+            self._plot_lane_ids(local_map)
 
         # Set plot properties with white text for black background
         self.ax.set_title(title, fontsize=14, fontweight='bold', color='white')
@@ -126,7 +138,7 @@ class LocalMapVisualizer:
 
         # Add legend
         self._add_legend(show_lanes, show_centerlines,
-                        show_traffic_elements, show_ego_position, ego_points)
+                        show_traffic_elements, show_ego_position, ego_points, trajectory_points)
 
         # Adjust layout
         plt.tight_layout()
@@ -142,6 +154,21 @@ class LocalMapVisualizer:
         """Plot lane boundaries from local map with actual colors and line types."""
         logger.debug(f"Processing {len(local_map.lanes)} lanes for boundary plotting")
         logger.debug(f"Total boundary segments in local_map: {len(local_map.boundary_segments)}")
+        
+        # Log boundary segment info for road266
+        road266_lane_ids = set()
+        for lane in local_map.lanes:
+            if lane.road_id == 266:
+                road266_lane_ids.add(lane.lane_id)
+                # Get boundary segment indices
+                all_indices = list(lane.left_boundary_segment_indices) + list(lane.right_boundary_segment_indices)
+                for idx in all_indices:
+                    if idx < len(local_map.boundary_segments):
+                        seg = local_map.boundary_segments[idx]
+                        if seg.boundary_points:
+                            max_y = max(p.y for p in seg.boundary_points)
+                            min_y = min(p.y for p in seg.boundary_points)
+                            logger.info(f"Road266 boundary seg {idx}: {len(seg.boundary_points)} pts, Y=[{min_y:.2f}, {max_y:.2f}]")
 
         # Color mapping for BoundaryColor enum
         # XODR standard colors: white, yellow, blue, red
@@ -181,149 +208,86 @@ class LocalMapVisualizer:
                 logger.debug(f"Boundary segment {i}: skipped (only {len(points)} points)")
                 continue
 
-            # Check if this segment has segmented boundary data
-            has_segmented_data = (
-                segment.boundary_color_segments and
-                segment.boundary_line_shape_segments and
-                segment.boundary_thickness_segments
+            # Check if this segment has per-point boundary data
+            # Each attribute list corresponds 1:1 with boundary_points
+            has_per_point_data = (
+                segment.boundary_colors and
+                segment.boundary_line_shapes and
+                segment.boundary_thicknesses and
+                len(segment.boundary_colors) == len(segment.boundary_points)
             )
 
-            if has_segmented_data:
-                # Use segmented boundary data
-                # Each segment array contains (Point3D, property_value) tuples
-                # We need to split the boundary_points into sub-segments based on these
+            if has_per_point_data:
+                # Use per-point boundary data - group consecutive points with same properties
+                # into sub-segments for efficient rendering
                 
-                # Get the segment start points and their properties
-                color_segments = segment.boundary_color_segments
-                line_shape_segments = segment.boundary_line_shape_segments
-                thickness_segments = segment.boundary_thickness_segments
+                # Build sub-segments by grouping consecutive points with same properties
+                sub_segments = []  # [(start_idx, end_idx, color, linestyle, width), ...]
                 
-                # Sort segments by their start point (approximate by index in boundary_points)
-                # Since we don't have exact s-to-point mapping, we'll use a simplified approach
-                
-                # Find the index in boundary_points for each segment's start point
-                # color_segments contains (Point3D, property_value) tuples
-                # where Point3D is the starting coordinate of each segment
-                
-                # Helper function to find index in boundary_points that matches a Point3D
-                def find_point_index(target_point: Point3D, tolerance: float = 0.001) -> int:
-                    """Find the index in boundary_points that matches target_point within tolerance."""
-                    for idx, p in enumerate(segment.boundary_points):
-                        if (abs(p.x - target_point.x) < tolerance and
-                            abs(p.y - target_point.y) < tolerance):
-                            return idx
-                    return -1
-                
-                # Build list of (segment_idx, start_index) pairs
-                segment_start_indices = []  # [(original_seg_idx, start_index), ...]
-                for seg_idx, (start_point, _) in enumerate(color_segments):
-                    start_idx = find_point_index(start_point)
-                    if start_idx >= 0:
-                        segment_start_indices.append((seg_idx, start_idx))
-                
-                # Sort by start_index
-                segment_start_indices.sort(key=lambda x: x[1])
-                
-                # Build point to segment mapping
-                # Each point belongs to the segment whose start_index is <= point_index
-                # and is the largest such start_index
-                point_to_segment = {}  # {point_idx: segment_idx}
-                current_seg_idx = None
-                current_seg_start_idx = -1
-                
-                for point_idx in range(len(points)):
-                    # Check if this point matches any segment start
-                    for seg_idx, start_idx in segment_start_indices:
-                        if point_idx == start_idx:
-                            current_seg_idx = seg_idx
-                            current_seg_start_idx = start_idx
-                            break
+                if len(points) >= 2:
+                    current_start = 0
+                    current_color = segment.boundary_colors[0] if segment.boundary_colors else None
+                    current_shape = segment.boundary_line_shapes[0] if segment.boundary_line_shapes else None
+                    current_thickness = segment.boundary_thicknesses[0] if segment.boundary_thicknesses else 0.1
                     
-                    # Assign segment to this point
-                    if current_seg_idx is not None:
-                        point_to_segment[point_idx] = current_seg_idx
-                
-                # Group points by segment
-                segment_points = {}  # {seg_idx: [points]}
-                for point_idx, point in enumerate(points):
-                    seg_idx = point_to_segment.get(point_idx)
-                    if seg_idx is not None:
-                        if seg_idx not in segment_points:
-                            segment_points[seg_idx] = []
-                        segment_points[seg_idx].append(point)
-                
-                # Process each segment
-                if segment_points:
-                    # Check if all sub-segments have only 1 point (common for junction boundaries)
-                    # In this case, merge all points into one segment
-                    all_single_points = all(len(pts) == 1 for pts in segment_points.values())
+                    for idx in range(1, len(points)):
+                        # Check if properties changed at this point
+                        color_changed = (idx >= len(segment.boundary_colors) or
+                                        segment.boundary_colors[idx] != current_color)
+                        shape_changed = (idx >= len(segment.boundary_line_shapes) or
+                                        segment.boundary_line_shapes[idx] != current_shape)
+                        thickness_changed = (idx >= len(segment.boundary_thicknesses) or
+                                            abs(segment.boundary_thicknesses[idx] - current_thickness) > 0.01)
+                        
+                        if color_changed or shape_changed or thickness_changed or idx == len(points) - 1:
+                            # End current sub-segment
+                            end_idx = idx if idx == len(points) - 1 else idx
+                            if end_idx > current_start:
+                                # Map enum values to matplotlib values
+                                color = color_map.get(
+                                    current_color.value if current_color and hasattr(current_color, 'value') else 0,
+                                    'gray'
+                                )
+                                linestyle = linestyle_map.get(
+                                    current_shape.value if current_shape and hasattr(current_shape, 'value') else 0,
+                                    '-'
+                                )
+                                width = max(0.5, current_thickness * 3)
+                                
+                                sub_segments.append((current_start, end_idx, color, linestyle, width))
+                            
+                            # Start new sub-segment
+                            if idx < len(points) - 1:
+                                current_start = idx
+                                current_color = segment.boundary_colors[idx] if idx < len(segment.boundary_colors) else current_color
+                                current_shape = segment.boundary_line_shapes[idx] if idx < len(segment.boundary_line_shapes) else current_shape
+                                current_thickness = segment.boundary_thicknesses[idx] if idx < len(segment.boundary_thicknesses) else current_thickness
                     
-                    if all_single_points and len(segment_points) > 1:
-                        # Merge all points into one segment, use first segment's properties
-                        merged_points = []
-                        for seg_idx in sorted(segment_points.keys()):
-                            merged_points.extend(segment_points[seg_idx])
-                        
-                        if len(merged_points) >= 2:
-                            color_value = color_segments[0][1] if color_segments else None
-                            line_shape_value = line_shape_segments[0][1] if line_shape_segments else None
-                            thickness_value = thickness_segments[0][1] if thickness_segments else 0.1
-                            
-                            color = color_map.get(color_value.value if color_value and hasattr(color_value, 'value') else 0, 'cyan')
-                            linestyle = linestyle_map.get(line_shape_value.value if line_shape_value and hasattr(line_shape_value, 'value') else 0, (0, (2, 2, 2, 2)))
-                            width = max(0.5, (thickness_value if isinstance(thickness_value, (int, float)) else 0.1) * 3)
-                            
-                            all_sub_segments.append(merged_points)
-                            all_colors.append(color)
-                            all_linestyles.append(linestyle)
-                            all_widths.append(width)
-                            logger.debug(f"Boundary segment {i}: merged {len(segment_points)} single-point segments into one")
-                    else:
-                        # Normal processing for segments with multiple points
-                        for seg_idx, seg_points in segment_points.items():
-                            if len(seg_points) < 2:
-                                continue  # Need at least 2 points to draw a line
-                            
-                            sub_segment_points = seg_points
-                            
-                            # Get properties for this sub-segment
-                            color_value = color_segments[seg_idx][1] if seg_idx < len(color_segments) else color_segments[0][1]
-                            line_shape_value = line_shape_segments[seg_idx][1] if seg_idx < len(line_shape_segments) else line_shape_segments[0][1]
-                            thickness_value = thickness_segments[seg_idx][1] if seg_idx < len(thickness_segments) else thickness_segments[0][1]
-                            
-                            # Map enum values to matplotlib values
-                            color = color_map.get(color_value.value if hasattr(color_value, 'value') else 0, 'gray')
-                            linestyle = linestyle_map.get(line_shape_value.value if hasattr(line_shape_value, 'value') else 0, '-')
-                            width = max(0.5, thickness_value * 3)
-                            
-                            all_sub_segments.append(sub_segment_points)
-                            all_colors.append(color)
-                            all_linestyles.append(linestyle)
-                            all_widths.append(width)
-                            
-                            logger.debug(f"Boundary segment {i}, sub-segment {seg_idx}: "
-                                       f"color={color}, style={linestyle}, width={width:.1f}, "
-                                       f"points={len(sub_segment_points)}")
-                else:
-                    # No segments found by point matching, use first segment's properties
-                    # This handles cases where point coordinates don't exactly match
-                    if len(points) >= 2:
-                        all_sub_segments.append(points)
-                        # Use first segment's properties or defaults
-                        color_value = color_segments[0][1] if color_segments else None
-                        line_shape_value = line_shape_segments[0][1] if line_shape_segments else None
-                        thickness_value = thickness_segments[0][1] if thickness_segments else 0.1
-                        
-                        color = color_map.get(color_value.value if color_value and hasattr(color_value, 'value') else 0, 'cyan')
-                        linestyle = linestyle_map.get(line_shape_value.value if line_shape_value and hasattr(line_shape_value, 'value') else 0, (0, (2, 2, 2, 2)))
-                        width = max(0.5, (thickness_value if isinstance(thickness_value, (int, float)) else 0.1) * 3)
-                        
+                    # If no sub-segments were created (all points have same properties), create one
+                    if not sub_segments and len(points) >= 2:
+                        color = color_map.get(
+                            current_color.value if current_color and hasattr(current_color, 'value') else 0,
+                            'gray'
+                        )
+                        linestyle = linestyle_map.get(
+                            current_shape.value if current_shape and hasattr(current_shape, 'value') else 0,
+                            '-'
+                        )
+                        width = max(0.5, current_thickness * 3)
+                        sub_segments.append((0, len(points) - 1, color, linestyle, width))
+                
+                # Add sub-segments to collection
+                for start_idx, end_idx, color, linestyle, width in sub_segments:
+                    sub_points = points[start_idx:end_idx + 1]
+                    if len(sub_points) >= 2:
+                        all_sub_segments.append(sub_points)
                         all_colors.append(color)
                         all_linestyles.append(linestyle)
                         all_widths.append(width)
-                        logger.debug(f"Boundary segment {i}: using first segment properties (color={color}, style={linestyle})")
+                        logger.debug(f"Boundary segment {i}: sub-segment [{start_idx}:{end_idx}] "
+                                   f"color={color}, style={linestyle}, width={width:.1f}")
             else:
-                # No segmented data, use default virtual boundary style
+                # No per-point data, use default virtual boundary style
                 if len(points) >= 2:
                     all_sub_segments.append(points)
                     all_colors.append('cyan')  # Cyan for virtual boundaries
@@ -386,23 +350,53 @@ class LocalMapVisualizer:
     def _plot_centerlines(self, local_map: LocalMap) -> None:
         """Plot lane centerlines from local map."""
         centerlines = []
+        short_centerlines = []  # Centerlines with few points (likely short roads)
 
         for lane in local_map.lanes:
             if lane.centerline_points:
                 points = [(p.x, p.y) for p in lane.centerline_points]
                 if len(points) > 1:
-                    centerlines.append(points)
+                    # Log road266 centerlines for debugging
+                    if lane.road_id == 266:
+                        max_y = max(p[1] for p in points)
+                        min_y = min(p[1] for p in points)
+                        logger.info(f"Road266 lane {lane.lane_id}: {len(points)} points, Y range=[{min_y:.2f}, {max_y:.2f}]")
+                        logger.info(f"  First point: {points[0]}, Last point: {points[-1]}")
+                    
+                    # Separate short centerlines (<=5 points or short length)
+                    if len(points) <= 5:
+                        # Calculate approximate length
+                        total_length = 0
+                        for i in range(len(points) - 1):
+                            dx = points[i+1][0] - points[i][0]
+                            dy = points[i+1][1] - points[i][1]
+                            total_length += (dx*dx + dy*dy) ** 0.5
+                        if total_length <= 10:  # Short road (<=10m)
+                            short_centerlines.append(points)
+                        else:
+                            centerlines.append(points)
+                    else:
+                        centerlines.append(points)
 
-        logger.debug(f"Found {len(centerlines)} lanes with centerlines (out of {len(local_map.lanes)} total lanes)")
+        logger.debug(f"Found {len(centerlines)} regular centerlines and {len(short_centerlines)} short centerlines (out of {len(local_map.lanes)} total lanes)")
 
-        # Plot centerlines (lime dashed, thinner)
+        # Plot regular centerlines (lime dashed, thinner)
         if centerlines:
             lc_center = LineCollection(centerlines, colors='lime',
                                       linewidths=1.0, alpha=0.8,
                                       linestyles='--', label='Centerline')
             self.ax.add_collection(lc_center)
-            logger.debug(f"Plotted {len(centerlines)} centerlines")
-        else:
+            logger.debug(f"Plotted {len(centerlines)} regular centerlines")
+        
+        # Plot short centerlines with more visible style (thicker, solid, cyan)
+        if short_centerlines:
+            lc_short = LineCollection(short_centerlines, colors='cyan',
+                                      linewidths=2.0, alpha=1.0,
+                                      linestyles='-', label='Short Centerline')
+            self.ax.add_collection(lc_short)
+            logger.debug(f"Plotted {len(short_centerlines)} short centerlines with enhanced visibility")
+        
+        if not centerlines and not short_centerlines:
             logger.debug("No centerlines to plot")
 
     def _plot_road_ids(self, local_map: LocalMap) -> None:
@@ -410,10 +404,35 @@ class LocalMapVisualizer:
         
         This method adds Road ID text labels to help identify which road
         each lane belongs to. The label is placed at the midpoint of each
-        lane's centerline. For lanes belonging to the same road, only one
-        label is shown (at the lane with the most centerline points).
+        lane's centerline, but only if the midpoint is within the visible range.
+        For lanes belonging to the same road, only one label is shown.
         """
         import math
+        
+        # Get visible range from metadata (in local coordinates, ego is at origin)
+        # Use map_range from metadata instead of axis limits, since axis limits
+        # may not be set yet when this method is called
+        if local_map.metadata:
+            map_range_x = local_map.metadata.map_range_x
+            map_range_y = local_map.metadata.map_range_y
+        else:
+            # Fallback: calculate from actual data bounds
+            all_x = []
+            all_y = []
+            for lane in local_map.lanes:
+                for pt in lane.centerline_points:
+                    all_x.append(pt.x)
+                    all_y.append(pt.y)
+            if all_x and all_y:
+                map_range_x = max(abs(min(all_x)), abs(max(all_x))) + 10
+                map_range_y = max(abs(min(all_y)), abs(max(all_y))) + 10
+            else:
+                map_range_x = 100.0
+                map_range_y = 100.0
+        
+        def is_in_visible_range(x, y, margin=10):
+            """Check if point is within visible range with small margin."""
+            return (abs(x) <= map_range_x + margin and abs(y) <= map_range_y + margin)
         
         # Group lanes by road_id and find the best lane for labeling each road
         road_lanes = {}  # {road_id: best_lane_info}
@@ -422,24 +441,45 @@ class LocalMapVisualizer:
             if not lane.centerline_points or len(lane.centerline_points) < 2:
                 continue
             
-            # Get road_id - prefer original_road_id if available, otherwise road_id
-            road_id = lane.original_road_id if lane.original_road_id is not None else lane.road_id
+            # Get road_id - use the new road_id directly
+            road_id = lane.road_id
             
             if road_id is None:
                 continue
             
-            # Calculate lane "weight" - prefer longer lanes with more points
-            lane_weight = len(lane.centerline_points)
+            # Filter centerline_points to only include points within the visible range
+            # This handles cases where clipping didn't fully work
+            visible_points = [(i, pt) for i, pt in enumerate(lane.centerline_points)
+                             if is_in_visible_range(pt.x, pt.y)]
+            
+            # Skip this lane if no points are in visible range
+            if not visible_points:
+                continue
+            
+            # Find the best point for labeling - prefer a point near the "visual center"
+            # of the visible portion of the lane
+            label_x, label_y = None, None
+            
+            if len(visible_points) == 1:
+                # Only one visible point, use it
+                label_x, label_y = visible_points[0][1].x, visible_points[0][1].y
+            else:
+                # Use the midpoint of the visible points
+                mid_visible_idx = len(visible_points) // 2
+                label_x, label_y = visible_points[mid_visible_idx][1].x, visible_points[mid_visible_idx][1].y
+            
+            # Final sanity check: ensure label position is within range
+            if not is_in_visible_range(label_x, label_y):
+                continue
+            
+            # Calculate lane "weight" - prefer lanes with more visible points
+            lane_weight = len(visible_points)
             
             if road_id not in road_lanes or lane_weight > road_lanes[road_id]['weight']:
-                # Calculate midpoint of centerline
-                mid_idx = len(lane.centerline_points) // 2
-                mid_point = lane.centerline_points[mid_idx]
-                
                 road_lanes[road_id] = {
                     'weight': lane_weight,
-                    'x': mid_point.x,
-                    'y': mid_point.y,
+                    'x': label_x,
+                    'y': label_y,
                     'lane': lane
                 }
         
@@ -471,6 +511,93 @@ class LocalMapVisualizer:
             plotted_count += 1
         
         logger.debug(f"Plotted {plotted_count} Road ID labels")
+
+    def _plot_lane_ids(self, local_map: LocalMap) -> None:
+        """Plot Lane ID labels at the center of each lane.
+        
+        This method adds Lane ID text labels to help identify each lane.
+        The label is placed at the midpoint of each lane's centerline.
+        Uses a smaller font size than road ID labels.
+        """
+        import math
+        
+        # Get visible range from metadata (in local coordinates, ego is at origin)
+        # Use map_range from metadata instead of axis limits, since axis limits
+        # may not be set yet when this method is called
+        if local_map.metadata:
+            map_range_x = local_map.metadata.map_range_x
+            map_range_y = local_map.metadata.map_range_y
+        else:
+            # Fallback: calculate from actual data bounds
+            all_x = []
+            all_y = []
+            for lane in local_map.lanes:
+                for pt in lane.centerline_points:
+                    all_x.append(pt.x)
+                    all_y.append(pt.y)
+            if all_x and all_y:
+                map_range_x = max(abs(min(all_x)), abs(max(all_x))) + 10
+                map_range_y = max(abs(min(all_y)), abs(max(all_y))) + 10
+            else:
+                map_range_x = 100.0
+                map_range_y = 100.0
+        
+        def is_in_visible_range(x, y, margin=10):
+            """Check if point is within visible range with small margin."""
+            return (abs(x) <= map_range_x + margin and abs(y) <= map_range_y + margin)
+        
+        plotted_count = 0
+        for lane in local_map.lanes:
+            if not lane.centerline_points or len(lane.centerline_points) < 2:
+                continue
+            
+            # Get lane_id - use the new lane_id directly
+            lane_id = lane.lane_id
+            
+            if lane_id is None:
+                continue
+            
+            # Filter centerline_points to only include points within the visible range
+            # This handles cases where clipping didn't fully work
+            visible_points = [(i, pt) for i, pt in enumerate(lane.centerline_points)
+                             if is_in_visible_range(pt.x, pt.y)]
+            
+            # Skip this lane if no points are in visible range
+            if not visible_points:
+                continue
+            
+            # Find the best point for labeling - prefer a point near the "visual center"
+            # of the visible portion of the lane
+            label_x, label_y = None, None
+            
+            if len(visible_points) == 1:
+                # Only one visible point, use it
+                label_x, label_y = visible_points[0][1].x, visible_points[0][1].y
+            else:
+                # Use the midpoint of the visible points
+                mid_visible_idx = len(visible_points) // 2
+                label_x, label_y = visible_points[mid_visible_idx][1].x, visible_points[mid_visible_idx][1].y
+            
+            # Final sanity check: ensure label position is within range
+            if not is_in_visible_range(label_x, label_y):
+                continue
+            
+            # Add text label with smaller font (7pt vs 9pt for road IDs)
+            self.ax.text(
+                label_x, label_y,
+                f"L{lane_id}",
+                fontsize=7,  # Smaller font than road IDs (9pt)
+                fontweight='normal',
+                color='lightgreen',
+                alpha=0.8,
+                ha='center',
+                va='center',
+                bbox=dict(boxstyle='round,pad=0.2', facecolor='black', alpha=0.5, edgecolor='lightgreen', linewidth=0.5),
+                zorder=14
+            )
+            plotted_count += 1
+        
+        logger.debug(f"Plotted {plotted_count} Lane ID labels")
 
     def _plot_traffic_elements(self, local_map: LocalMap) -> None:
         """Plot traffic lights and signs from local map."""
@@ -530,13 +657,45 @@ class LocalMapVisualizer:
             self.ax.text(point.x + 1, point.y + 1,
                        f"P{i+1}", fontsize=8, alpha=0.7, color='white')
 
+    def _plot_trajectory(self, trajectory_points: List[Point3D]) -> None:
+        """Plot trajectory as a connected path with gradient color."""
+        if not trajectory_points or len(trajectory_points) < 2:
+            return
+
+        import numpy as np
+        
+        # Extract x, y coordinates
+        x_coords = [p.x for p in trajectory_points]
+        y_coords = [p.y for p in trajectory_points]
+        
+        # Create line segments for colored trajectory
+        points = np.array([x_coords, y_coords]).T.reshape(-1, 1, 2)
+        segments = np.concatenate([points[:-1], points[1:]], axis=1)
+        
+        # Create color array (gradient from cyan to red based on position in trajectory)
+        colors = plt.cm.coolwarm(np.linspace(0, 1, len(segments)))
+        
+        # Plot trajectory segments with gradient color
+        for i, (seg, color) in enumerate(zip(segments, colors)):
+            self.ax.plot(seg[:, 0], seg[:, 1], color=color, linewidth=2, alpha=0.8,
+                        label='Trajectory' if i == 0 else None)
+        
+        # Mark start point (green)
+        self.ax.scatter(x_coords[0], y_coords[0], c='lime', s=80, marker='o',
+                       edgecolors='white', linewidths=2, zorder=5, label='Start')
+        
+        # Mark end point (red)
+        self.ax.scatter(x_coords[-1], y_coords[-1], c='red', s=80, marker='s',
+                       edgecolors='white', linewidths=2, zorder=5, label='End')
+
     def _add_legend(
         self,
         show_lanes: bool,
         show_centerlines: bool,
         show_traffic_elements: bool,
         show_ego_position: bool,
-        ego_points: Optional[List[Point3D]]
+        ego_points: Optional[List[Point3D]],
+        trajectory_points: Optional[List[Point3D]] = None
     ) -> None:
         """Add legend to plot."""
         from matplotlib.lines import Line2D
@@ -562,6 +721,12 @@ class LocalMapVisualizer:
         if ego_points:
             handles.append(Line2D([0], [0], marker='x', color='magenta', linestyle='None',
                                markersize=8, label='Test Point'))
+        if trajectory_points and len(trajectory_points) >= 2:
+            handles.append(Line2D([0], [0], color='cyan', linewidth=2, label='Trajectory'))
+            handles.append(Line2D([0], [0], marker='o', color='lime', linestyle='None',
+                               markersize=8, markeredgecolor='white', label='Start'))
+            handles.append(Line2D([0], [0], marker='s', color='red', linestyle='None',
+                               markersize=8, markeredgecolor='white', label='End'))
 
         if handles:
             self.ax.legend(handles=handles, loc='upper right', fontsize=9, labelcolor='white')

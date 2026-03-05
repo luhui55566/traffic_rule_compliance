@@ -35,6 +35,7 @@ class ConversionConfig:
     # Ego vehicle pose for local coordinate transformation
     ego_x: float = 0.0
     ego_y: float = 0.0
+    ego_z: float = None  # Height/altitude. If provided, 3D distance is used for road matching
     ego_heading: float = 0.0
     
     # Map source identifier

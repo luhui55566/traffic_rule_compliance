@@ -10,7 +10,7 @@ from datetime import datetime
 
 from common.local_map.local_map_data import (
     LocalMap, Header, LocalMapMetadata, Point3D, Pose,
-    Lane, LaneBoundarySegment, SpeedLimitSegment,
+    Lane, LaneBoundarySegment,
     TrafficSign, TrafficLight,
     RoadMarking, RoadMarkingType, RoadMarkingColor,
     Crosswalk, StopLine, StopLineType,
@@ -221,20 +221,6 @@ class LocalMapBuilder:
         """
         lane.left_boundary_segment_indices = left_boundary_indices
         lane.right_boundary_segment_indices = right_boundary_indices
-    
-    def associate_lane_with_speed_limits(
-        self,
-        lane: Lane,
-        speed_limits: List[SpeedLimitSegment]
-    ) -> None:
-        """
-        Associate speed limits with a lane.
-        
-        Args:
-            lane: Lane object to update
-            speed_limits: List of SpeedLimitSegment objects
-        """
-        lane.speed_limits = speed_limits
     
     def associate_traffic_elements_with_lanes(self) -> None:
         """

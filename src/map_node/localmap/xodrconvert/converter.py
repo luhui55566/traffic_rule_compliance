@@ -98,6 +98,414 @@ class XODRMapConverter:
             self._next_boundary_id += 1
         return self._boundary_cache[key]
     
+    def _clip_centerline_at_range(
+        self,
+        centerline_points: List[Point3D],
+        s_values: List[float],
+        map_range: float
+    ) -> Tuple[List[Point3D], List[float]]:
+        """
+        Clip centerline points at the map_range boundary using rectangular bounds.
+        
+        This method ensures that centerlines extending beyond the map range
+        are properly clipped at the boundary, with interpolated points added
+        where the centerline crosses the range limit.
+        
+        Uses rectangular bounds (|x| <= range and |y| <= range) to match
+        the visualization's axis limits.
+        
+        Args:
+            centerline_points: List of centerline points in local coordinates
+            s_values: List of s values corresponding to each point
+            map_range: Maximum range from ego (origin in local coords)
+            
+        Returns:
+            Tuple of (clipped_points, clipped_s_values)
+        """
+        if not centerline_points or len(centerline_points) < 2:
+            return centerline_points, s_values
+        
+        clipped_points = []
+        clipped_s_values = []
+        
+        # Helper function to check if point is in rectangular range
+        def is_in_range(pt: Point3D) -> bool:
+            return abs(pt.x) <= map_range and abs(pt.y) <= map_range
+        
+        # Helper function to find intersection with boundary edge
+        def interpolate_at_boundary(p1: Point3D, p2: Point3D, s1: float, s2: float,
+                                    boundary: str) -> Tuple[Point3D, float]:
+            """
+            Interpolate to find the point where line crosses a boundary edge.
+            
+            Args:
+                p1, p2: Endpoints of the line segment
+                s1, s2: S values at endpoints
+                boundary: One of 'x+', 'x-', 'y+', 'y-' indicating which boundary
+            """
+            dx = p2.x - p1.x
+            dy = p2.y - p1.y
+            
+            if boundary == 'x+':
+                # Crossing x = +map_range
+                if abs(dx) < 1e-9:
+                    t = 0.5
+                else:
+                    t = (map_range - p1.x) / dx
+            elif boundary == 'x-':
+                # Crossing x = -map_range
+                if abs(dx) < 1e-9:
+                    t = 0.5
+                else:
+                    t = (-map_range - p1.x) / dx
+            elif boundary == 'y+':
+                # Crossing y = +map_range
+                if abs(dy) < 1e-9:
+                    t = 0.5
+                else:
+                    t = (map_range - p1.y) / dy
+            else:  # y-
+                # Crossing y = -map_range
+                if abs(dy) < 1e-9:
+                    t = 0.5
+                else:
+                    t = (-map_range - p1.y) / dy
+            
+            t = max(0.0, min(1.0, t))  # Clamp to [0, 1]
+            
+            interp_x = p1.x + t * dx
+            interp_y = p1.y + t * dy
+            interp_z = p1.z + t * (p2.z - p1.z)
+            interp_s = s1 + t * (s2 - s1)
+            
+            return Point3D(x=interp_x, y=interp_y, z=interp_z), interp_s
+        
+        # Helper function to find all boundary crossings for a segment
+        def find_boundary_crossings(p1: Point3D, p2: Point3D, s1: float, s2: float):
+            """Find all points where segment crosses rectangular boundary."""
+            crossings = []
+            
+            # Check each boundary edge
+            boundaries = []
+            if (p1.x > map_range) != (p2.x > map_range):
+                boundaries.append('x+')
+            if (p1.x < -map_range) != (p2.x < -map_range):
+                boundaries.append('x-')
+            if (p1.y > map_range) != (p2.y > map_range):
+                boundaries.append('y+')
+            if (p1.y < -map_range) != (p2.y < -map_range):
+                boundaries.append('y-')
+            
+            for boundary in boundaries:
+                pt, s_val = interpolate_at_boundary(p1, p2, s1, s2, boundary)
+                # Verify the interpolated point is actually on the boundary
+                if abs(pt.x) <= map_range + 0.01 and abs(pt.y) <= map_range + 0.01:
+                    crossings.append((pt, s_val, t_for_boundary(p1, p2, boundary)))
+            
+            # Sort by parameter t to maintain order along segment
+            crossings.sort(key=lambda x: x[2])
+            return [(pt, s) for pt, s, _ in crossings]
+        
+        def t_for_boundary(p1: Point3D, p2: Point3D, boundary: str) -> float:
+            """Calculate t parameter for boundary crossing."""
+            dx = p2.x - p1.x
+            dy = p2.y - p1.y
+            
+            if boundary in ('x+', 'x-'):
+                if abs(dx) < 1e-9:
+                    return 0.5
+                target = map_range if boundary == 'x+' else -map_range
+                return (target - p1.x) / dx
+            else:
+                if abs(dy) < 1e-9:
+                    return 0.5
+                target = map_range if boundary == 'y+' else -map_range
+                return (target - p1.y) / dy
+        
+        # Process each segment
+        prev_point = centerline_points[0]
+        prev_s = s_values[0]
+        prev_in_range = is_in_range(prev_point)
+        
+        # Start with first point if in range
+        if prev_in_range:
+            clipped_points.append(prev_point)
+            clipped_s_values.append(prev_s)
+        
+        for i in range(1, len(centerline_points)):
+            curr_point = centerline_points[i]
+            curr_s = s_values[i]
+            curr_in_range = is_in_range(curr_point)
+            
+            if prev_in_range and curr_in_range:
+                # Both in range - add current point
+                clipped_points.append(curr_point)
+                clipped_s_values.append(curr_s)
+            elif prev_in_range and not curr_in_range:
+                # Exiting range - add boundary crossing point(s)
+                crossings = find_boundary_crossings(prev_point, curr_point, prev_s, curr_s)
+                for pt, s_val in crossings:
+                    clipped_points.append(pt)
+                    clipped_s_values.append(s_val)
+            elif not prev_in_range and curr_in_range:
+                # Entering range - add boundary crossing point(s) then current point
+                crossings = find_boundary_crossings(prev_point, curr_point, prev_s, curr_s)
+                for pt, s_val in crossings:
+                    clipped_points.append(pt)
+                    clipped_s_values.append(s_val)
+                clipped_points.append(curr_point)
+                clipped_s_values.append(curr_s)
+            # else: both out of range - check if segment passes through range
+            elif not prev_in_range and not curr_in_range:
+                # Check if segment crosses through the rectangular region
+                crossings = find_boundary_crossings(prev_point, curr_point, prev_s, curr_s)
+                if len(crossings) >= 2:
+                    # Segment passes through - add entry and exit points
+                    for pt, s_val in crossings[:2]:  # Take first two (entry and exit)
+                        clipped_points.append(pt)
+                        clipped_s_values.append(s_val)
+            
+            prev_point = curr_point
+            prev_s = curr_s
+            prev_in_range = curr_in_range
+        
+        # If we only have 0 or 1 points after clipping, return empty to avoid drawing issues
+        if len(clipped_points) < 2:
+            logger.debug(f"Centerline clipped to {len(clipped_points)} points (insufficient for drawing)")
+            return [], []
+        
+        return clipped_points, clipped_s_values
+    
+    def _resample_centerline_uniform(
+        self,
+        centerline_points: List[Point3D],
+        s_values: List[float],
+        target_spacing: float
+    ) -> Tuple[List[Point3D], List[float]]:
+        """
+        Resample centerline points to ensure uniform spacing.
+        
+        This fixes the issue where pyOpenDRIVE's sampling produces uneven gaps
+        on curved roads by interpolating points at regular intervals.
+        
+        Args:
+            centerline_points: List of centerline points
+            s_values: List of s values corresponding to each point
+            target_spacing: Target distance between consecutive points (meters)
+            
+        Returns:
+            Tuple of (resampled_points, resampled_s_values)
+        """
+        if len(centerline_points) < 2:
+            return centerline_points, s_values
+        
+        # Calculate total path length
+        total_length = 0.0
+        segment_lengths = []
+        for i in range(len(centerline_points) - 1):
+            p1 = centerline_points[i]
+            p2 = centerline_points[i + 1]
+            length = math.sqrt((p2.x - p1.x)**2 + (p2.y - p1.y)**2 + (p2.z - p1.z)**2)
+            segment_lengths.append(length)
+            total_length += length
+        
+        if total_length < 0.01:  # Nearly zero length
+            return centerline_points, s_values
+        
+        # Calculate number of segments needed
+        num_segments = max(2, int(math.ceil(total_length / target_spacing)))
+        
+        # Generate uniformly spaced points
+        resampled_points = []
+        resampled_s_values = []
+        
+        # Always include first point
+        resampled_points.append(centerline_points[0])
+        resampled_s_values.append(s_values[0])
+        
+        # Interpolate points at uniform intervals
+        target_dist = total_length / num_segments
+        current_target = target_dist
+        
+        accumulated_dist = 0.0
+        for i in range(len(segment_lengths)):
+            seg_length = segment_lengths[i]
+            p1 = centerline_points[i]
+            p2 = centerline_points[i + 1]
+            s1 = s_values[i]
+            s2 = s_values[i + 1]
+            
+            # Process this segment
+            seg_start_dist = accumulated_dist
+            seg_end_dist = accumulated_dist + seg_length
+            
+            # Add interpolated points within this segment
+            while current_target < seg_end_dist - 0.001:  # Small tolerance to avoid duplicates
+                # Calculate interpolation parameter
+                if seg_length < 0.001:
+                    t = 0.0
+                else:
+                    t = (current_target - seg_start_dist) / seg_length
+                t = max(0.0, min(1.0, t))
+                
+                # Interpolate point
+                interp_x = p1.x + t * (p2.x - p1.x)
+                interp_y = p1.y + t * (p2.y - p1.y)
+                interp_z = p1.z + t * (p2.z - p1.z)
+                interp_s = s1 + t * (s2 - s1)
+                
+                resampled_points.append(Point3D(x=interp_x, y=interp_y, z=interp_z))
+                resampled_s_values.append(interp_s)
+                
+                current_target += target_dist
+            
+            accumulated_dist = seg_end_dist
+        
+        # Always include last point if not already included
+        if len(resampled_points) > 0:
+            last_point = resampled_points[-1]
+            end_point = centerline_points[-1]
+            dist_to_end = math.sqrt(
+                (end_point.x - last_point.x)**2 +
+                (end_point.y - last_point.y)**2 +
+                (end_point.z - last_point.z)**2
+            )
+            if dist_to_end > 0.001:  # Only add if not essentially the same point
+                resampled_points.append(centerline_points[-1])
+                resampled_s_values.append(s_values[-1])
+        
+        return resampled_points, resampled_s_values
+    
+    def _clip_boundary_at_range(
+        self,
+        boundary_points: List[Point3D],
+        map_range: float
+    ) -> List[Point3D]:
+        """
+        Clip boundary points at the map_range boundary using rectangular bounds.
+        
+        This is similar to _clip_centerline_at_range but for boundary segments
+        that don't have s values.
+        
+        Args:
+            boundary_points: List of boundary points in local coordinates
+            map_range: Maximum range from ego (origin in local coords)
+            
+        Returns:
+            List of clipped boundary points
+        """
+        if not boundary_points or len(boundary_points) < 2:
+            return boundary_points
+        
+        clipped_points = []
+        
+        # Helper function to check if point is in rectangular range
+        def is_in_range(pt: Point3D) -> bool:
+            return abs(pt.x) <= map_range and abs(pt.y) <= map_range
+        
+        # Helper function to find intersection with boundary edge
+        def interpolate_at_boundary(p1: Point3D, p2: Point3D, boundary: str) -> Point3D:
+            dx = p2.x - p1.x
+            dy = p2.y - p1.y
+            
+            if boundary == 'x+':
+                t = (map_range - p1.x) / dx if abs(dx) > 1e-9 else 0.5
+            elif boundary == 'x-':
+                t = (-map_range - p1.x) / dx if abs(dx) > 1e-9 else 0.5
+            elif boundary == 'y+':
+                t = (map_range - p1.y) / dy if abs(dy) > 1e-9 else 0.5
+            else:  # y-
+                t = (-map_range - p1.y) / dy if abs(dy) > 1e-9 else 0.5
+            
+            t = max(0.0, min(1.0, t))
+            
+            return Point3D(
+                x=p1.x + t * dx,
+                y=p1.y + t * dy,
+                z=p1.z + t * (p2.z - p1.z)
+            )
+        
+        # Helper function to find all boundary crossings for a segment
+        def find_boundary_crossings(p1: Point3D, p2: Point3D):
+            crossings = []
+            
+            # Check each boundary edge
+            boundaries = []
+            if (p1.x > map_range) != (p2.x > map_range):
+                boundaries.append('x+')
+            if (p1.x < -map_range) != (p2.x < -map_range):
+                boundaries.append('x-')
+            if (p1.y > map_range) != (p2.y > map_range):
+                boundaries.append('y+')
+            if (p1.y < -map_range) != (p2.y < -map_range):
+                boundaries.append('y-')
+            
+            for boundary in boundaries:
+                pt = interpolate_at_boundary(p1, p2, boundary)
+                # Verify the interpolated point is actually on the boundary
+                if abs(pt.x) <= map_range + 0.01 and abs(pt.y) <= map_range + 0.01:
+                    crossings.append((pt, t_for_boundary(p1, p2, boundary)))
+            
+            # Sort by parameter t to maintain order along segment
+            crossings.sort(key=lambda x: x[1])
+            return [pt for pt, _ in crossings]
+        
+        def t_for_boundary(p1: Point3D, p2: Point3D, boundary: str) -> float:
+            dx = p2.x - p1.x
+            dy = p2.y - p1.y
+            
+            if boundary in ('x+', 'x-'):
+                if abs(dx) < 1e-9:
+                    return 0.5
+                target = map_range if boundary == 'x+' else -map_range
+                return (target - p1.x) / dx
+            else:
+                if abs(dy) < 1e-9:
+                    return 0.5
+                target = map_range if boundary == 'y+' else -map_range
+                return (target - p1.y) / dy
+        
+        # Process each segment
+        prev_point = boundary_points[0]
+        prev_in_range = is_in_range(prev_point)
+        
+        # Start with first point if in range
+        if prev_in_range:
+            clipped_points.append(prev_point)
+        
+        for i in range(1, len(boundary_points)):
+            curr_point = boundary_points[i]
+            curr_in_range = is_in_range(curr_point)
+            
+            if prev_in_range and curr_in_range:
+                # Both in range - add current point
+                clipped_points.append(curr_point)
+            elif prev_in_range and not curr_in_range:
+                # Exiting range - add boundary crossing point(s)
+                crossings = find_boundary_crossings(prev_point, curr_point)
+                clipped_points.extend(crossings)
+            elif not prev_in_range and curr_in_range:
+                # Entering range - add boundary crossing point(s) then current point
+                crossings = find_boundary_crossings(prev_point, curr_point)
+                clipped_points.extend(crossings)
+                clipped_points.append(curr_point)
+            # else: both out of range - check if segment passes through range
+            elif not prev_in_range and not curr_in_range:
+                # Check if segment crosses through the rectangular region
+                crossings = find_boundary_crossings(prev_point, curr_point)
+                if len(crossings) >= 2:
+                    # Segment passes through - add entry and exit points
+                    clipped_points.extend(crossings[:2])
+            
+            prev_point = curr_point
+            prev_in_range = curr_in_range
+        
+        # If we only have 0 or 1 points after clipping, return empty
+        if len(clipped_points) < 2:
+            return []
+        
+        return clipped_points
+    
     def convert_lane_type(self, xodr_lane_type: str) -> LaneType:
         """
         Convert XODR lane type to LocalMap LaneType.
@@ -298,10 +706,14 @@ class XODRMapConverter:
         
         # Extract speed limit
         speed_limit = 0.0
-        if hasattr(odr_road, 'get_s_to_speed'):
-            speed_at_0 = odr_road.get_s_to_speed(0.0)
-            if speed_at_0:
-                speed_limit = self.convert_speed_limit(speed_at_0.max, speed_at_0.unit)
+        # pyOpenDRIVE exposes s_to_speed as a property (dict), not a method
+        if hasattr(odr_road, 's_to_speed') and odr_road.s_to_speed:
+            # Get the first speed record (at s=0 or lowest s value)
+            s_to_speed_dict = odr_road.s_to_speed
+            if s_to_speed_dict:
+                first_s = min(s_to_speed_dict.keys())
+                speed_record = s_to_speed_dict[first_s]
+                speed_limit = self.convert_speed_limit(speed_record.max, speed_record.unit)
         
         # Extract predecessor/successor information
         predecessor_road_id = None
@@ -603,26 +1015,162 @@ class XODRMapConverter:
                 sorted_pairs = sorted(zip(centerline_s_values, centerline_points), key=lambda x: x[0])
                 centerline_points = [pt for _, pt in sorted_pairs]
             
-            # Convert to local coordinates and filter by distance
+            # Convert to local coordinates
+            # Note: We clip centerline points at map_range boundary to ensure:
+            # 1. Partially-visible roads show their visible portion properly
+            # 2. Centerlines don't extend beyond the requested map range
+            # 3. Visualization shows correct data within the range
             if self.transformer:
                 local_centerline = []
-                map_range_sq = self.config.map_range * self.config.map_range
-                for point in centerline_points:
+                filtered_s_values = []
+                for point, s_val in zip(centerline_points, centerline_s_values):
                     result = self.transformer.global_to_local(point)
                     if result.success:
-                        # Filter points outside map_range (in local coords, ego is at origin)
-                        dist_sq = result.point.x ** 2 + result.point.y ** 2
-                        if dist_sq <= map_range_sq:
-                            local_centerline.append(result.point)
+                        local_centerline.append(result.point)
+                        filtered_s_values.append(s_val)
                 centerline_points = local_centerline
+                centerline_s_values = filtered_s_values
                 
-                # If all points were filtered out, skip this lane
+                # If all points failed to convert, skip this lane
                 if not centerline_points:
                     return ConversionResult(
                         success=False,
                         data=None,
-                        errors=["All centerline points filtered out (outside map_range)"]
+                        errors=["All centerline points failed coordinate transformation"]
                     )
+                
+                # Clip centerline at map_range boundary
+                # This ensures that roads partially within range show only their visible portion
+                if self.config and hasattr(self.config, 'map_range') and len(centerline_points) > 1:
+                    clipped_centerline, clipped_s_values = self._clip_centerline_at_range(
+                        centerline_points, centerline_s_values, self.config.map_range
+                    )
+                    if clipped_centerline:
+                        centerline_points = clipped_centerline
+                        centerline_s_values = clipped_s_values
+            
+            # Resample centerline to ensure uniform point spacing
+            # This fixes the issue where pyOpenDRIVE's sampling produces uneven gaps
+            if len(centerline_points) > 2:
+                resampled_points, resampled_s_values = self._resample_centerline_uniform(
+                    centerline_points, centerline_s_values, self.config.eps
+                )
+                if len(resampled_points) >= 2:
+                    centerline_points = resampled_points
+                    centerline_s_values = resampled_s_values
+            
+            # Calculate per-point speed limits based on s values
+            max_speed_limits = []
+            min_speed_limits = []
+            speed_limit_types = []
+            
+            # Get speed records from road (road-level speed limits)
+            # pyOpenDRIVE exposes s_to_speed as a property (not a method)
+            s_to_speed = None
+            if hasattr(odr_road, 's_to_speed'):
+                s_to_speed = odr_road.s_to_speed
+            elif hasattr(odr_road, 'get_s_to_speed'):
+                # Fallback for older API
+                s_to_speed = odr_road.get_s_to_speed()
+            
+            # Get lane-level speed records (priority over road-level)
+            # Lane speed is defined inside <lane><speed sOffset="..." max="..."/></lane>
+            # pyOpenDRIVE exposes this as speed_records (list of PyLaneSpeedRecord)
+            lane_speed_records = None
+            if hasattr(odr_lane, 'speed_records'):
+                lane_speed_data = odr_lane.speed_records
+                if lane_speed_data is not None and len(lane_speed_data) > 0:
+                    # Convert list to dict indexed by s_offset for easier lookup
+                    lane_speed_records = {}
+                    for speed_entry in lane_speed_data:
+                        s_offset = float(speed_entry.s_offset) if hasattr(speed_entry, 's_offset') else 0.0
+                        lane_speed_records[s_offset] = speed_entry
+            
+            # For each centerline point, look up the speed limit at its s value
+            for s_val in centerline_s_values:
+                max_speed = 0.0  # Default: no speed limit
+                min_speed = 0.0  # Default: no minimum speed
+                speed_type = SpeedLimitType.REGULAR
+                
+                # Priority 1: Check lane-level speed limits (relative to lane section start)
+                # sOffset is relative to the lane section start (lanesection_s0)
+                applicable_lane_speed = None
+                if lane_speed_records:
+                    # s_val is absolute s coordinate on the road
+                    # Convert to relative s within the lane section
+                    s_relative = s_val - lanesection_s0
+                    for s_offset, speed_entry in lane_speed_records.items():
+                        # Find the speed entry that applies at this relative s position
+                        # Each entry applies from its sOffset until the next entry or end of lane section
+                        entry_s_offset = float(s_offset)
+                        # Check if this entry applies (s_relative >= sOffset)
+                        if s_relative >= entry_s_offset:
+                            if applicable_lane_speed is None or entry_s_offset > applicable_lane_speed[0]:
+                                applicable_lane_speed = (entry_s_offset, speed_entry)
+                
+                if applicable_lane_speed:
+                    speed_entry = applicable_lane_speed[1]
+                    # max and unit are bytes from pyOpenDRIVE, need to decode
+                    max_val = speed_entry.max
+                    if isinstance(max_val, bytes):
+                        max_val = max_val.decode('utf-8')
+                    max_speed = float(max_val) if max_val else 0.0
+                    # Handle unit - default is m/s if not specified
+                    unit = speed_entry.unit if hasattr(speed_entry, 'unit') else b'm/s'
+                    if isinstance(unit, bytes):
+                        unit = unit.decode('utf-8')
+                    max_speed = self.convert_speed_limit(max_speed, unit)
+                elif s_to_speed:
+                    # Priority 2: Fall back to road-level speed limits
+                    # Find the applicable speed record for this s value
+                    # Speed records are indexed by their start s value
+                    applicable_speed = None
+                    for record_s, speed_record in s_to_speed.items():
+                        # Check if this record applies at s_val
+                        record_s_val = float(record_s) if not isinstance(record_s, float) else record_s
+                        record_s_end = float(speed_record.s_end) if hasattr(speed_record, 's_end') else lanesection_send
+                        
+                        if record_s_val <= s_val <= record_s_end:
+                            if applicable_speed is None or record_s_val > float(applicable_speed[0]):
+                                applicable_speed = (record_s, speed_record)
+                    
+                    if applicable_speed:
+                        speed_record = applicable_speed[1]
+                        # Handle bytes from pyOpenDRIVE
+                        max_val = speed_record.max
+                        if isinstance(max_val, bytes):
+                            max_val = max_val.decode('utf-8')
+                        max_speed = float(max_val) if max_val else 0.0
+                        
+                        unit = speed_record.unit if hasattr(speed_record, 'unit') else 'm/s'
+                        if isinstance(unit, bytes):
+                            unit = unit.decode('utf-8')
+                        max_speed = self.convert_speed_limit(max_speed, unit)
+                        
+                        # Some roads may have min speed limit
+                        if hasattr(speed_record, 'min') and speed_record.min is not None:
+                            min_val = speed_record.min
+                            if isinstance(min_val, bytes):
+                                min_val = min_val.decode('utf-8')
+                            min_speed = self.convert_speed_limit(float(min_val), unit)
+                
+                max_speed_limits.append(max_speed)
+                min_speed_limits.append(min_speed)
+                speed_limit_types.append(speed_type)
+            
+            # Safety check: ensure speed limit lists match centerline points length
+            if len(max_speed_limits) != len(centerline_points):
+                logger.warning(f"Speed limit list length ({len(max_speed_limits)}) != centerline points length ({len(centerline_points)}), adjusting...")
+                # If we have fewer speed limits than points, fill with default values
+                while len(max_speed_limits) < len(centerline_points):
+                    max_speed_limits.append(0.0)
+                    min_speed_limits.append(0.0)
+                    speed_limit_types.append(SpeedLimitType.REGULAR)
+                # If we have more speed limits than points, truncate
+                if len(max_speed_limits) > len(centerline_points):
+                    max_speed_limits = max_speed_limits[:len(centerline_points)]
+                    min_speed_limits = min_speed_limits[:len(centerline_points)]
+                    speed_limit_types = speed_limit_types[:len(centerline_points)]
             
             # Create Lane object
             lane = Lane(
@@ -632,7 +1180,9 @@ class XODRMapConverter:
                 centerline_points=centerline_points,
                 left_boundary_segment_indices=[],
                 right_boundary_segment_indices=[],
-                speed_limits=[],
+                max_speed_limits=max_speed_limits,
+                min_speed_limits=min_speed_limits,
+                speed_limit_types=speed_limit_types,
                 # XODR-specific fields
                 original_lane_id=lane_id,
                 original_road_id=road_id,
@@ -705,31 +1255,32 @@ class XODRMapConverter:
             if not boundary_points:
                 return None
             
-            # Convert to local coordinates and filter by distance
+            # Convert to local coordinates
             if self.transformer:
                 local_boundary = []
-                map_range_sq = self.config.map_range * self.config.map_range
                 for point in boundary_points:
                     result = self.transformer.global_to_local(point)
                     if result.success:
-                        # Filter points outside map_range (in local coords, ego is at origin)
-                        dist_sq = result.point.x ** 2 + result.point.y ** 2
-                        if dist_sq <= map_range_sq:
-                            local_boundary.append(result.point)
+                        local_boundary.append(result.point)
                 boundary_points = local_boundary
                 
-                # If all points were filtered out, return None
+                # If all points failed to convert, return None
                 if not boundary_points:
                     return None
+                
+                # Clip boundary points at rectangular map_range boundary
+                # This ensures boundaries match the visualization's axis limits
+                if self.config and hasattr(self.config, 'map_range') and len(boundary_points) > 1:
+                    clipped_boundary = self._clip_boundary_at_range(boundary_points, self.config.map_range)
+                    if clipped_boundary:
+                        boundary_points = clipped_boundary
+                    else:
+                        return None  # All points were outside range
             
             # Extract roadmark properties using get_roadmarks() and roadmark_groups
             # RoadMark has type, s_start, s_end, width, group_s0
             # RoadMarkGroup has type, color, weight, material, etc.
             # We match RoadMark.group_s0 to RoadMarkGroup.s_offset
-            roadmark_type = 'none'
-            roadmark_color = 'white'
-            roadmark_width = 0.1
-            s_start = lanesection_s0
             
             # Get roadmark groups for color information
             roadmark_group_map = {}
@@ -738,87 +1289,98 @@ class XODRMapConverter:
                     if hasattr(group, 's_offset'):
                         roadmark_group_map[group.s_offset] = group
             
-            # Get roadmarks for type and width information
-            # Build segmented boundary arrays with Point3D coordinates
-            boundary_type_segments = []
-            boundary_line_shape_segments = []
-            boundary_color_segments = []
-            boundary_thickness_segments = []
-            is_virtual_segments = []
+            # Build list of roadmark segments: [(s_start, s_end, type, color, width), ...]
+            roadmark_segments = []
             
             if hasattr(odr_lane, 'get_roadmarks'):
                 roadmarks = odr_lane.get_roadmarks(lanesection_s0, lanesection_end)
                 
                 if roadmarks:
-                    # Process each roadmark and create a boundary segment for it
                     for roadmark in roadmarks:
-                        roadmark_type = roadmark.type
-                        roadmark_width = roadmark.width if hasattr(roadmark, 'width') else 0.1
-                        s_start = roadmark.s_start if hasattr(roadmark, 's_start') else lanesection_s0
+                        rm_type = roadmark.type
+                        rm_width = roadmark.width if hasattr(roadmark, 'width') else 0.1
+                        rm_s_start = roadmark.s_start if hasattr(roadmark, 's_start') else lanesection_s0
+                        rm_s_end = roadmark.s_end if hasattr(roadmark, 's_end') else lanesection_end
                         
                         # Try to find matching roadmark group for color
+                        rm_color = 'white'
                         if hasattr(roadmark, 'group_s0'):
                             group = roadmark_group_map.get(roadmark.group_s0)
                             if group and hasattr(group, 'color'):
-                                roadmark_color = group.color
-                            else:
-                                roadmark_color = 'white'
+                                rm_color = group.color
                         
-                        # Calculate the boundary point at this s coordinate
-                        # Get the t offset for the boundary at s_start
-                        try:
-                            global_point=None
-                            border_line = odr_road.get_lane_border_line(
-                                lane=odr_lane,
-                                s_start = s_start, 
-                                s_end = s_start+0.001,
-                                eps=self.config.eps,
-                                outer=is_outer
-                                )
-                            if border_line and hasattr(border_line, 'array'):
-                            # border_line.array contains a list of PyVec3D objects
-                            # Each PyVec3D has an 'array' property that returns [x, y, z]
-                                v = border_line.array[0]
-                                global_point = Point3D(x=v.array[0], y=v.array[1], z=v.array[2])
-                            
-                            # Calculate global xyz coordinates at (s_start, t_offset, 0)
-                            if global_point:
-                                # Convert to local coordinates
-                                if self.transformer:
-                                    result = self.transformer.global_to_local(global_point)
-                                    if result.success:
-                                        start_point = result.point
-                                    else:
-                                        start_point = global_point
-                                else:
-                                    start_point = global_point
-                            else:
-                                start_point = Point3D(x=0, y=0, z=0)
-                        except Exception as e:
-                            logger.warning(f"Failed to calculate boundary point at s={s_start}: {e}")
-                            start_point = Point3D(x=0, y=0, z=0)
-                        
-                        # Add to segment arrays with Point3D coordinates
-                        boundary_type_segments.append((start_point, self.convert_boundary_type(roadmark_type)))
-                        boundary_line_shape_segments.append((start_point, self.convert_boundary_line_shape(roadmark_type)))
-                        boundary_color_segments.append((start_point, self.convert_boundary_color(roadmark_color)))
-                        boundary_thickness_segments.append((start_point, roadmark_width))
-                        is_virtual_segments.append((start_point, roadmark_type.lower() == 'none'))
+                        roadmark_segments.append((rm_s_start, rm_s_end, rm_type, rm_color, rm_width))
             
-            # If no roadmarks were found (common for junction lanes), provide default VIRTUAL segmented data
-            # This ensures the boundary will be rendered by the visualization code
-            if not boundary_type_segments and boundary_points:
-                # For junction lanes without roadmarks, add a single VIRTUAL segment
-                # Use the first boundary point as the segment start point
-                first_point = boundary_points[0]
-                boundary_type_segments.append((first_point, BoundaryType.VIRTUAL))
-                boundary_line_shape_segments.append((first_point, BoundaryLineShape.UNKNOWN))
-                boundary_color_segments.append((first_point, BoundaryColor.UNKNOWN))
-                boundary_thickness_segments.append((first_point, 0.1))
-                is_virtual_segments.append((first_point, True))
+            # Build per-point attribute lists that correspond 1:1 with boundary_points
+            # Each boundary point gets attributes based on which roadmark segment it falls into
+            boundary_types = []
+            boundary_line_shapes = []
+            boundary_colors = []
+            boundary_thicknesses = []
+            is_virtuals = []
+            
+            # Get s values for each boundary point by sampling the road geometry
+            boundary_s_values = []
+            if boundary_points and hasattr(odr_road, 'get_lane_border_line'):
+                for _ in boundary_points:
+                    # We'll compute s values by interpolating along the lane
+                    # For now, use uniform distribution as approximation
+                    pass
+            
+            # If we have roadmark segments, we need to map each point to its segment
+            # Since boundary_points are sampled uniformly along s, we can estimate s for each point
+            if roadmark_segments and boundary_points:
+                # Sort roadmark segments by s_start
+                roadmark_segments.sort(key=lambda x: x[0])
+                
+                # Estimate s value for each boundary point based on its index
+                # Assume points are uniformly distributed from lanesection_s0 to lanesection_end
+                total_s_length = lanesection_end - lanesection_s0
+                num_points = len(boundary_points)
+                
+                for point_idx in range(num_points):
+                    # Estimate s value for this point
+                    estimated_s = lanesection_s0 + (point_idx / max(1, num_points - 1)) * total_s_length
+                    
+                    # Find the roadmark segment this point falls into
+                    matched_segment = None
+                    for rm_s_start, rm_s_end, rm_type, rm_color, rm_width in roadmark_segments:
+                        if rm_s_start <= estimated_s <= rm_s_end:
+                            matched_segment = (rm_type, rm_color, rm_width)
+                            break
+                    
+                    if matched_segment is None:
+                        # Point doesn't fall into any segment, use first segment's properties
+                        if roadmark_segments:
+                            _, _, rm_type, rm_color, rm_width = roadmark_segments[0]
+                            matched_segment = (rm_type, rm_color, rm_width)
+                        else:
+                            matched_segment = ('none', 'white', 0.1)
+                    
+                    rm_type, rm_color, rm_width = matched_segment
+                    boundary_types.append(self.convert_boundary_type(rm_type))
+                    boundary_line_shapes.append(self.convert_boundary_line_shape(rm_type))
+                    boundary_colors.append(self.convert_boundary_color(rm_color))
+                    boundary_thicknesses.append(rm_width)
+                    is_virtuals.append(rm_type.lower() == 'none')
+            
+            elif boundary_points:
+                # No roadmark segments found - use default VIRTUAL values for all points
+                default_type = BoundaryType.VIRTUAL
+                default_shape = BoundaryLineShape.UNKNOWN
+                default_color = BoundaryColor.UNKNOWN
+                default_thickness = 0.1
+                default_is_virtual = True
+                
+                for _ in boundary_points:
+                    boundary_types.append(default_type)
+                    boundary_line_shapes.append(default_shape)
+                    boundary_colors.append(default_color)
+                    boundary_thicknesses.append(default_thickness)
+                    is_virtuals.append(default_is_virtual)
                 
                 logger.debug(f"No roadmarks found for boundary segment (road={road_id}, lane={lane_id}), "
-                           f"using VIRTUAL type for {len(boundary_points)} points (single segment)")
+                           f"using VIRTUAL type for {len(boundary_points)} points")
             
             # Generate boundary segment ID
             boundary_suffix = 'outer' if is_outer else 'inner'
@@ -827,11 +1389,11 @@ class XODRMapConverter:
             return LaneBoundarySegment(
                 segment_id=segment_id,
                 boundary_points=boundary_points,
-                boundary_type_segments=boundary_type_segments,
-                boundary_line_shape_segments=boundary_line_shape_segments,
-                boundary_color_segments=boundary_color_segments,
-                boundary_thickness_segments=boundary_thickness_segments,
-                is_virtual_segments=is_virtual_segments
+                boundary_types=boundary_types,
+                boundary_line_shapes=boundary_line_shapes,
+                boundary_colors=boundary_colors,
+                boundary_thicknesses=boundary_thicknesses,
+                is_virtuals=is_virtuals
             )
             
         except Exception as e:

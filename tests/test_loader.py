@@ -10,9 +10,9 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from map_common.base import Position, BoundingBox, MapInfo
-from maploader.utils import UtmProjectorWrapper
-from maploader.loader import MapLoader
+from map_node.map_common.base import Position, BoundingBox, MapInfo
+from map_node.maploader.utils import UtmProjectorWrapper
+from map_node.maploader.loader import MapLoader
 
 
 class TestPosition(unittest.TestCase):

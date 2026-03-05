@@ -4,6 +4,15 @@
 
 LocalMap模块负责将不同格式的地图数据（OSM、XODR等）转换为统一的LocalMap格式。采用完全分离的架构，每种格式有独立的转换模块。
 
+输出的局部地图希望是，以自车为原点，给定距离阈值范围内（例如300米内），和当前自车所在road联通的所有road段组成，所有的road只保留300米内的信息。交通标识等其他元素仅保留300米内的信息。
+
+对xodr中同一个road内的lanesection之间的lane进行拼接。
+
+车道线边界点，每个点都绑定属性列表，boundary_types，boundary_line_shapes，boundary_colors，boundary_thicknesses，is_virtuals。
+
+
+
+
 ## 2. 目录结构
 
 ```

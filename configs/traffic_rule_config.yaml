@@ -6,13 +6,8 @@
 # ==================== Map Configuration ====================
 map:
   # Map format type: "osm" or "xodr"
-  format: "osm"
-  
-  # OSM map file path (relative to config file)
-  osm_file: "maps/Town10HD.osm"
-  
-  # XODR map file path (relative to config file)
-  xodr_file: "maps/Town10HD.xodr"
+  format: "xodr"
+  map_file: "maps/lgdd.xodr"
   
   # Map coordinate type: determines how map is loaded (OSM only)
   # - "local": Map data uses local coordinates (local_x, local_y in meters from OSM tags)
@@ -34,6 +29,13 @@ map:
   origin:
     latitude: 0.0  # Latitude in degrees (informational only)
     longitude: 0.0  # Longitude in degrees (informational only)
+  
+  # GPS to XODR coordinate transformation offset
+  coordinate_offset:
+    x: -368810.882003
+    y: -3435507.781697
+    z: -1.365000
+    headingz_rad: 0.005613371  # Updated with higher precision (was 0.005613)
  
 # ==================== Speed Limit Rule ====================
 speed_limit:
@@ -87,9 +89,24 @@ wrong_way:
   # Heading tolerance in degrees (vehicle heading can differ from lane direction)
   heading_tolerance: 45.0
  
+# ==================== Vehicle Configuration ====================
+vehicle:
+  # PKL file directory path (relative to project root)
+  pkl_directory: "datas/pkl"
+  
+  # Vehicle dimensions (meters)
+  length: 4.5   # Vehicle length
+  width: 1.8    # Vehicle width
+
 # ==================== System Configuration ====================
 # History window in seconds (how much vehicle state history to keep)
-history_window: 10.0 
+history_window: 10.0
  
 # Enable/disable map query caching
 cache_enabled: true
+
+# ==================== Env Node Configuration ====================
+env_node:
+  # Maximum history trajectory length (number of points)
+  # PKL files are 100ms each, so 150 points = 15 seconds
+  max_history_length: 150
