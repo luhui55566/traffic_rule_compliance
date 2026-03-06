@@ -418,6 +418,7 @@ class LocalMapProcessor:
         
         return points
     
+
     def _is_point_in_lane_boundary(
         self,
         point: Point3D,
@@ -425,9 +426,9 @@ class LocalMapProcessor:
         right_boundary: List[Point3D]
     ) -> bool:
         """
-        检查点是否在车道边界内
+        检查点是否在车道边界内（优化版）
         
-        使用简化的方法：检查点是否在左右边界之间
+        使用点到折线距离的方法，分别计算到左右边界的最短距离
         
         Args:
             point: 待检查的点
@@ -440,42 +441,151 @@ class LocalMapProcessor:
         if not left_boundary or not right_boundary:
             return False
         
-        # 找到最近的左右边界点对
-        min_dist_sum = float('inf')
-        best_left = None
-        best_right = None
+        # 计算到左边界和右边界的最短距离
+        min_dist_left = self._point_to_polyline_distance_optimized(point, left_boundary)
+        min_dist_right = self._point_to_polyline_distance_optimized(point, right_boundary)
         
-        # 简化：使用采样点对
-        num_samples = min(len(left_boundary), len(right_boundary))
-        for i in range(num_samples):
-            left_idx = int(i * len(left_boundary) / num_samples)
-            right_idx = int(i * len(right_boundary) / num_samples)
-            
-            left_pt = left_boundary[left_idx]
-            right_pt = right_boundary[right_idx]
-            
-            # 计算点到这对边界的距离和
-            dist_to_left = math.sqrt((point.x - left_pt.x)**2 + (point.y - left_pt.y)**2)
-            dist_to_right = math.sqrt((point.x - right_pt.x)**2 + (point.y - right_pt.y)**2)
-            dist_sum = dist_to_left + dist_to_right
-            
-            if dist_sum < min_dist_sum:
-                min_dist_sum = dist_sum
-                best_left = left_pt
-                best_right = right_pt
-        
-        if best_left is None or best_right is None:
-            return False
-        
-        # 检查点是否在左右边界之间
-        # 计算左右边界的距离
-        boundary_width = math.sqrt(
-            (best_right.x - best_left.x)**2 + (best_right.y - best_left.y)**2
-        )
-        
-        # 如果点到左右边界的距离和小于边界宽度，则点在边界内
-        return min_dist_sum <= boundary_width * 1.1  # 增加10%的容差
+        # 判定：如果到两个边界的距离都小于阈值，认为在边界内
+        # 阈值设为5米（可根据实际需求调整）
+        return min_dist_left < 5.0 and min_dist_right < 5.0
     
+    def _point_to_polyline_distance_optimized(
+        self, 
+        point: Point3D, 
+        polyline: List[Point3D]
+    ) -> float:
+        """
+        计算点到折线的最短距离（优化版）
+        
+        步骤：
+        1. 在有序点序列中找到距离最近的点（单峰搜索）
+        2. 计算该点前后两条线段到目标点的垂直距离
+        3. 取最小值
+        
+        Args:
+            point: 目标点
+            polyline: 有序点序列
+            
+        Returns:
+            float: 最短距离
+        """
+        if not polyline:
+            return float('inf')
+        
+        if len(polyline) == 1:
+            # 只有一个点，直接计算点到点距离
+            return math.sqrt((point.x - polyline[0].x)**2 + (point.y - polyline[0].y)**2)
+        
+        # 1. 找到距离最近的边界点（点到点距离，单峰搜索）
+        min_idx = self._find_closest_point_idx(point, polyline)
+        
+        # 2. 计算到前后两条线段的垂直距离
+        min_dist = float('inf')
+        
+        # 检查前一条线段：polyline[min_idx-1] -> polyline[min_idx]
+        if min_idx > 0:
+            dist = self._point_to_segment_distance(
+                point, polyline[min_idx - 1], polyline[min_idx]
+            )
+            min_dist = min(min_dist, dist)
+        
+        # 检查后一条线段：polyline[min_idx] -> polyline[min_idx+1]
+        if min_idx < len(polyline) - 1:
+            dist = self._point_to_segment_distance(
+                point, polyline[min_idx], polyline[min_idx + 1]
+            )
+            min_dist = min(min_dist, dist)
+        
+        # 如果只有一条线段的情况（只有一个方向的线段）
+        if min_dist == float('inf'):
+            # 退化情况：返回点到最近点的距离
+            pt = polyline[min_idx]
+            min_dist = math.sqrt((point.x - pt.x)**2 + (point.y - pt.y)**2)
+        
+        return min_dist
+    
+    def _find_closest_point_idx(self, point: Point3D, polyline: List[Point3D]) -> int:
+        """
+        在有序点序列中找到距离目标点最近的点的索引（单峰搜索）
+        
+        利用距离先减小后增大的特性，提前终止搜索
+        
+        Args:
+            point: 目标点
+            polyline: 有序点序列
+            
+        Returns:
+            int: 最近点的索引
+        """
+        if not polyline:
+            return -1
+        
+        min_dist = float('inf')
+        min_idx = 0
+        prev_dist = float('inf')
+        
+        for i, pt in enumerate(polyline):
+            # 计算点到点距离
+            dist = math.sqrt((point.x - pt.x)**2 + (point.y - pt.y)**2)
+            
+            # 更新最小值
+            if dist < min_dist:
+                min_dist = dist
+                min_idx = i
+            
+            # 检查是否开始增大（过了最近点）
+            # 如果当前距离大于前一个距离，且前一个距离已经是最小值附近
+            if i > 0 and dist > prev_dist and prev_dist <= min_dist:
+                # 距离开始增大，提前终止
+                break
+            
+            prev_dist = dist
+        
+        return min_idx
+    
+    def _point_to_segment_distance(
+        self, 
+        point: Point3D, 
+        p1: Point3D, 
+        p2: Point3D
+    ) -> float:
+        """
+        计算点到线段的最短距离（垂直距离）
+        
+        Args:
+            point: 目标点
+            p1: 线段起点
+            p2: 线段终点
+            
+        Returns:
+            float: 最短距离
+        """
+        # 线段向量
+        dx = p2.x - p1.x
+        dy = p2.y - p1.y
+        
+        # 线段长度平方
+        seg_len_sq = dx * dx + dy * dy
+        
+        if seg_len_sq == 0:
+            # 两个点重合，退化成点
+            return math.sqrt((point.x - p1.x)**2 + (point.y - p1.y)**2)
+        
+        # 计算投影参数 t (0 <= t <= 1 表示在线段上)
+        t = ((point.x - p1.x) * dx + (point.y - p1.y) * dy) / seg_len_sq
+        
+        # 限制 t 在 [0, 1] 范围内
+        t = max(0.0, min(1.0, t))
+        
+        # 最近点（垂足）坐标
+        closest_x = p1.x + t * dx
+        closest_y = p1.y + t * dy
+        
+        # 距离
+        dist = math.sqrt((point.x - closest_x)**2 + (point.y - closest_y)**2)
+        
+        return dist
+
     def _get_vehicle_corners(
         self,
         ego_pos: Point3D,
@@ -520,7 +630,9 @@ class LocalMapProcessor:
         centerline_points: List[Point3D]
     ) -> Tuple[float, int, float]:
         """
-        计算自车到车道中心线的距离
+        计算自车到车道中心线的距离（优化版）
+        
+        使用点到折线的垂直距离方法，更准确
         
         Args:
             ego_pos: 自车位置
@@ -529,23 +641,48 @@ class LocalMapProcessor:
         Returns:
             Tuple[float, int, float]: (最小距离, 最近点索引, 纵向比例)
         """
-        min_dist = float('inf')
-        closest_idx = 0
+        if not centerline_points:
+            return float('inf'), 0, 0.0
         
-        for i, point in enumerate(centerline_points):
+        if len(centerline_points) == 1:
+            # 只有一个点，直接计算点到点距离
             dist = math.sqrt(
-                (ego_pos.x - point.x) ** 2 +
-                (ego_pos.y - point.y) ** 2
+                (ego_pos.x - centerline_points[0].x) ** 2 +
+                (ego_pos.y - centerline_points[0].y) ** 2
             )
-            if dist < min_dist:
-                min_dist = dist
-                closest_idx = i
+            return dist, 0, 0.0
+        
+        # 1. 找到距离最近的中心线点（单峰搜索）
+        min_idx = self._find_closest_point_idx(ego_pos, centerline_points)
+        
+        # 2. 计算到前后两条线段的垂直距离
+        min_dist = float('inf')
+        
+        # 检查前一条线段：centerline_points[min_idx-1] -> centerline_points[min_idx]
+        if min_idx > 0:
+            dist = self._point_to_segment_distance(
+                ego_pos, centerline_points[min_idx - 1], centerline_points[min_idx]
+            )
+            min_dist = min(min_dist, dist)
+        
+        # 检查后一条线段：centerline_points[min_idx] -> centerline_points[min_idx+1]
+        if min_idx < len(centerline_points) - 1:
+            dist = self._point_to_segment_distance(
+                ego_pos, centerline_points[min_idx], centerline_points[min_idx + 1]
+            )
+            min_dist = min(min_dist, dist)
+        
+        # 如果只有一条线段的情况
+        if min_dist == float('inf'):
+            # 退化情况：返回点到最近点的距离
+            pt = centerline_points[min_idx]
+            min_dist = math.sqrt((ego_pos.x - pt.x)**2 + (ego_pos.y - pt.y)**2)
         
         # 计算纵向比例（自车在车道上的相对位置）
-        longitudinal_ratio = closest_idx / max(len(centerline_points) - 1, 1)
+        longitudinal_ratio = min_idx / max(len(centerline_points) - 1, 1)
         
-        return min_dist, closest_idx, longitudinal_ratio
-    
+        return min_dist, min_idx, longitudinal_ratio
+
     def _get_lane_heading_at_index(
         self,
         centerline_points: List[Point3D],

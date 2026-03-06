@@ -46,6 +46,9 @@ class XODRMapConverter:
         """
         self.transformer = transformer
         self.config = config or ConversionConfig()
+
+        # 映射表：(road_id, lane_section_s0, original_lane_id) -> local_lane_id
+        self.lane_id_mapping: Dict[Tuple[int, float, int], int] = {}
         
         # Cache for boundary segment sharing
         self._boundary_cache: Dict[str, int] = {}
@@ -548,6 +551,67 @@ class XODRMapConverter:
         else:
             return LaneDirection.UNKNOWN  # Center reference line
     
+    def _calculate_adjacent_original_ids(self, current_id, lanes):
+        """
+        计算当前车道的左右邻接原始lane_id
+        
+        Args:
+            current_id: 当前车道的原始ID
+            lanes: 同一laneSection内的所有lane对象列表
+            
+        Returns:
+            Tuple: (左邻接original_id, 右邻接original_id)
+        """
+        # 获取所有原始lane_id
+        all_original_ids = []
+        for lane in lanes:
+            lid = lane.id if hasattr(lane.id, 'decode') else lane.id
+            if isinstance(lid, bytes):
+                lid = int(lid.decode())
+            else:
+                lid = int(lid)
+            all_original_ids.append(lid)
+        
+        left_adj = None
+        right_adj = None
+        
+        # 左侧车道（lane_id > 0）
+        if current_id > 0:
+            if (current_id + 1) in all_original_ids:
+                left_adj = current_id + 1
+            
+            if current_id == 1:
+                if 0 in all_original_ids:
+                    right_adj = 0
+                elif -1 in all_original_ids:
+                    right_adj = -1
+            else:
+                if (current_id - 1) in all_original_ids:
+                    right_adj = current_id - 1
+        
+        # 参考线（lane_id = 0）
+        elif current_id == 0:
+            if 1 in all_original_ids:
+                left_adj = 1
+            if -1 in all_original_ids:
+                right_adj = -1
+        
+        # 右侧车道（lane_id < 0）
+        elif current_id < 0:
+            if current_id == -1:
+                if 0 in all_original_ids:
+                    left_adj = 0
+                elif 1 in all_original_ids:
+                    left_adj = 1
+            else:
+                if (current_id + 1) in all_original_ids:
+                    left_adj = current_id + 1
+            
+            if (current_id - 1) in all_original_ids:
+                right_adj = current_id - 1
+        
+        return left_adj, right_adj
+
     def convert_boundary_type(self, xodr_roadmark_type: str) -> BoundaryType:
         """
         Convert XODR roadmark type to LocalMap BoundaryType.
@@ -833,15 +897,15 @@ class XODRMapConverter:
             road_id = int(odr_road.id.decode() if isinstance(odr_road.id, bytes) else odr_road.id)
             lane_id = int(odr_lane.id.decode() if isinstance(odr_lane.id, bytes) else odr_lane.id)
             
-            # Skip center lane (lane_id=0) - it represents the boundary between innermost lanes
-            # but should not be converted to a Lane object in the final localmap
-            if lane_id == 0:
-                return ConversionResult(
-                    success=True,
-                    data=None,
-                    warnings=["Center lane (lane_id=0) skipped - boundary lines will be added to boundary pool"],
-                    errors=[]
-                )
+            # Keep center lane (lane_id=0) for now to preserve adjacency relationships
+            # It will be filtered later if needed
+            # if lane_id == 0:
+            #     return ConversionResult(
+            #         success=True,
+            #         data=None,
+            #         warnings=["Center lane (lane_id=0) skipped - boundary lines will be added to boundary pool"],
+            #         errors=[]
+            #     )
             
             # Generate unique lane ID
             local_lane_id = self.generate_lane_id(road_id, lanesection_s0, lane_id)
@@ -1045,9 +1109,9 @@ class XODRMapConverter:
                     clipped_centerline, clipped_s_values = self._clip_centerline_at_range(
                         centerline_points, centerline_s_values, self.config.map_range
                     )
-                    if clipped_centerline:
-                        centerline_points = clipped_centerline
-                        centerline_s_values = clipped_s_values
+                    # Always use clipped result (may be empty if all points are out of range)
+                    centerline_points = clipped_centerline
+                    centerline_s_values = clipped_s_values
             
             # Resample centerline to ensure uniform point spacing
             # This fixes the issue where pyOpenDRIVE's sampling produces uneven gaps
@@ -1172,6 +1236,17 @@ class XODRMapConverter:
                     min_speed_limits = min_speed_limits[:len(centerline_points)]
                     speed_limit_types = speed_limit_types[:len(centerline_points)]
             
+            # Calculate adjacent lane IDs
+            left_adj_original, right_adj_original = self._calculate_adjacent_original_ids(lane_id, lanes)
+            
+            left_adjacent_lane_id = None
+            if left_adj_original is not None:
+                left_adjacent_lane_id = self.generate_lane_id(road_id, lanesection_s0, left_adj_original)
+            
+            right_adjacent_lane_id = None
+            if right_adj_original is not None:
+                right_adjacent_lane_id = self.generate_lane_id(road_id, lanesection_s0, right_adj_original)
+            
             # Create Lane object
             lane = Lane(
                 lane_id=local_lane_id,
@@ -1183,15 +1258,21 @@ class XODRMapConverter:
                 max_speed_limits=max_speed_limits,
                 min_speed_limits=min_speed_limits,
                 speed_limit_types=speed_limit_types,
+                # Adjacent lanes
+                left_adjacent_lane_id=left_adjacent_lane_id,
+                right_adjacent_lane_id=right_adjacent_lane_id,
                 # XODR-specific fields
                 original_lane_id=lane_id,
                 original_road_id=road_id,
+                original_lane_section_s0=lanesection_s0,
                 original_junction_id=junction_id,
                 map_source_type="XODR",
                 map_source_id=self.config.map_source_id,
                 road_id=road_id,
                 junction_id=junction_id
             )
+
+            # 添加映射
             
             return ConversionResult(
                 success=True,

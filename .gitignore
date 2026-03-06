@@ -18,3 +18,4 @@ src/veh_status/__pycache__/
 tests/output/
 src/map_node/__pycache__/
 tests/__pycache__/
+output/

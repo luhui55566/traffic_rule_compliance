@@ -303,6 +303,9 @@ class LocalMapConstructor:
         
         # Post-process: Merge lanes with same original_lane_id within same road
         #self._merge_lanes_across_sections()
+        # 后处理：填充车道邻接关系
+        self._validate_adjacent_lane_relations()
+
     
     def _merge_lanes_across_sections(self) -> None:
         """
@@ -952,3 +955,39 @@ class LocalMapConstructor:
             ConversionStatistics or None if no conversion performed
         """
         return self.statistics
+
+    def _validate_adjacent_lane_relations(self):
+        """
+        验证所有Lane的邻接关系是否有效
+        
+        检查每个Lane的邻接ID是否都指向实际存在的Lane
+        """
+        if not self.builder._lanes:
+            return
+        
+        # 构建所有lane_id的集合
+        all_lane_ids = {lane.lane_id for lane in self.builder._lanes}
+        
+        # 验证每个lane的邻接ID
+        invalid_count = 0
+        for lane in self.builder._lanes:
+            if lane.left_adjacent_lane_id is not None:
+                if lane.left_adjacent_lane_id not in all_lane_ids:
+                    logger.warning(
+                        f"Lane {lane.lane_id} has invalid left_adjacent_lane_id: "
+                        f"{lane.left_adjacent_lane_id} (not found in local_map)"
+                    )
+                    invalid_count += 1
+            
+            if lane.right_adjacent_lane_id is not None:
+                if lane.right_adjacent_lane_id not in all_lane_ids:
+                    logger.warning(
+                        f"Lane {lane.lane_id} has invalid right_adjacent_lane_id: "
+                        f"{lane.right_adjacent_lane_id} (not found in local_map)"
+                    )
+                    invalid_count += 1
+        
+        if invalid_count > 0:
+            logger.warning(f"Found {invalid_count} invalid adjacent lane references")
+        else:
+            logger.info("All adjacent lane references are valid")

@@ -369,6 +369,7 @@ class Lane:
     original_lane_id: Optional[int] = None    # 原始lane ID / Original lane ID
     original_road_id: Optional[int] = None    # 原始road ID / Original road ID
     original_junction_id: Optional[int] = None # 原始junction ID / Original junction ID
+    original_lane_section_s0: Optional[float] = None  # 原始lane section起始s坐标 / Original lane section start s coordinate
     
     # 地图源信息 / Map source information
     map_source_type: str = ""              # 地图源类型 / Map source type ("OSM", "XODR", etc.)

@@ -1,0 +1,9 @@
+# 项目依赖
+PyYAML>=6.0
+
+# pyOpenDRIVE 需要手动编译安装（不支持 pip 直接安装）
+# 安装步骤:
+#   1. 克隆或下载 pyOpenDRIVE 源码到项目目录
+#   2. 执行：cd pyOpenDRIVE && python3 setup.py build_ext --inplace
+#   3. 确保生成的 .so 文件在 Python 可导入路径中
+# pyOpenDRIVE>=1.3.0  # 注释掉，因为需要手动编译

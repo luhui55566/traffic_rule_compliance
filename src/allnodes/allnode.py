@@ -8,6 +8,7 @@ AllNodes - 交通规则符合性判定系统主调度模块
     - veh_status模块:读取车辆状态数据
     - map_node模块:加载地图,生成局部地图
     - env_node模块:环境模型融合，统一坐标系
+    - traffic_rule模块:交规符合性判断（新增）
 
 Usage:
     from src.allnodes.allnode import AllNodes
@@ -30,12 +31,20 @@ SRC_ROOT = PROJECT_ROOT / 'src'
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(SRC_ROOT))
 
-# 导入子模块（SRC_ROOT已添加到sys.path，可以直接导入）
+# 添加 pyOpenDRIVE 到路径（用于 XODR 地图加载）
+PYOPENDRIVE_PATH = PROJECT_ROOT / 'pyOpenDRIVE'
+if PYOPENDRIVE_PATH.exists():
+    sys.path.insert(0, str(PYOPENDRIVE_PATH))
+
+# 导入子模块（SRC_ROOT 已添加到 sys.path，可以直接导入）
 from veh_status import VehStatusReader, EgoVehicleState
 from map_node import MapNode
 from env_node import EnvNode, EnvironmentModel
 from common.local_map.local_map_data import LocalMap, Point3D
 from common.local_map.local_map_api import LocalMapAPI
+
+# 导入交规判断模块
+from traffic_rule import ViolationDetector, Violation
 
 # 配置日志
 logging.basicConfig(
@@ -73,9 +82,15 @@ class AllNodes:
         self.map_node: Optional[MapNode] = None
         self.env_node: Optional[EnvNode] = None
         
+        # 交规判断模块
+        self.violation_detector: Optional[ViolationDetector] = None
+        
         # 数据
         self.ego_states: List[EgoVehicleState] = []
         self._last_env_model: Optional[EnvironmentModel] = None  # 最后一个环境模型（用于可视化）
+        
+        # 违规记录
+        self._all_violations: List[Violation] = []
         
         # 可视化输出目录
         self.output_dir = PROJECT_ROOT / 'output' / 'local_maps'
@@ -126,8 +141,24 @@ class AllNodes:
         try:
             self.map_node = MapNode(self.config)
             return self.map_node.init()
+        except ImportError as e:
+            if "pyOpenDRIVE" in str(e) or "XODR" in str(e):
+                logger.error("=" * 60)
+                logger.error("pyOpenDRIVE 未安装，请按照以下步骤安装:")
+                logger.error("=" * 60)
+                logger.error("1. 确保 pyOpenDRIVE 源码在项目目录中:")
+                logger.error("   git clone https://github.com/DLR-TS/pyOpenDRIVE.git")
+                logger.error("")
+                logger.error("2. 编译安装:")
+                logger.error("   cd pyOpenDRIVE && python3 setup.py build_ext --inplace")
+                logger.error("")
+                logger.error("3. 将 pyOpenDRIVE 添加到 PYTHONPATH:")
+                logger.error("   export PYTHONPATH=$PYTHONPATH:/path/to/pyOpenDRIVE")
+                logger.error("=" * 60)
+            logger.error(f"map_node 模块初始化失败：{e}")
+            return False
         except Exception as e:
-            logger.error(f"map_node模块初始化失败: {e}")
+            logger.error(f"map_node 模块初始化失败：{e}")
             return False
     
     def _init_env_node(self) -> bool:
@@ -142,6 +173,21 @@ class AllNodes:
             return self.env_node.init()
         except Exception as e:
             logger.error(f"env_node模块初始化失败: {e}")
+            return False
+    
+    def _init_violation_detector(self) -> bool:
+        """
+        初始化交规判断模块
+        
+        Returns:
+            bool: 初始化是否成功
+        """
+        try:
+            self.violation_detector = ViolationDetector()
+            logger.info("交规判断模块初始化成功")
+            return True
+        except Exception as e:
+            logger.error(f"交规判断模块初始化失败: {e}")
             return False
     
     def init(self) -> bool:
@@ -169,6 +215,10 @@ class AllNodes:
         if not self._init_env_node():
             return False
         
+        # 初始化交规判断模块
+        if not self._init_violation_detector():
+            return False
+        
         # 创建输出目录
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -192,21 +242,17 @@ class AllNodes:
         self.ego_states = self.veh_status_reader.process()
         logger.info(f"读取到 {len(self.ego_states)} 帧车辆状态数据")
         
-        # 2. 逐帧处理: 生成局部地图并可视化
+        # 2. 逐帧处理: 生成局部地图和环境模型，检查交规
         self._process_frames()
         
-        # 3. TODO: 后续添加其他模块的处理
-        # - 环境模型模块: 统一坐标系和时间轴
-        # - traffic_rule模块: 判断交通规则符合性
-        
-        # 打印摘要信息
+        # 3. 打印摘要信息
         self._print_summary()
         
         return True
     
     def _process_frames(self) -> None:
         """
-        逐帧处理数据：生成局部地图和环境模型，每隔一定帧数保存可视化
+        逐帧处理数据：生成局部地图和环境模型，检查交规，每隔一定帧数保存可视化
         """
         logger.info("开始逐帧处理...")
         
@@ -218,8 +264,8 @@ class AllNodes:
         last_local_map: Optional[LocalMap] = None
         
         for i, ego_state in enumerate(self.ego_states):
-            # 每 10 帧生成一次局部地图，提高处理速度
-            if (i + 1) % 50 == 0:
+            # 第一帧或每 50 帧生成一次局部地图，提高处理速度
+            if i == 0 or (i + 1) % 50 == 0:
                 # 生成局部地图
                 local_map = self.map_node.process(ego_state)
                 if local_map is not None:
@@ -233,6 +279,12 @@ class AllNodes:
                 env_model = self.env_node.process(ego_state, local_map, self.map_node, i)
                 self._last_env_model = env_model  # 只保存最后一个环境模型
                 env_model_count += 1
+                
+                # 调用交规判断模块
+                if self.violation_detector is not None:
+                    violations = self.violation_detector.check_violations(env_model)
+                    if violations:
+                        self._all_violations.extend(violations)
                 
                 # 每隔 VISUALIZATION_INTERVAL 帧生成一次可视化
                 # 使用env_model中的local_map和ego_history
@@ -382,6 +434,20 @@ class AllNodes:
             print(f"\n环境模型节点:")
             print(f"  历史轨迹长度: {self.env_node.get_history_length()}")
         
+        # 打印交规检查结果
+        if self.violation_detector:
+            self.violation_detector.print_summary()
+            
+            # 打印详细违规信息
+            if self._all_violations:
+                print(f"\n违规详情:")
+                for i, v in enumerate(self._all_violations, 1):
+                    print(f"  {i}. [{v.level.name}] {v.rule_name}")
+                    print(f"     描述: {v.description}")
+                    print(f"     时间: {v.timestamp:.2f}s, 帧: {v.frame_index}")
+                    if v.speed is not None:
+                        print(f"     速度: {v.speed*3.6:.1f} km/h (限速: {v.speed_limit*3.6:.1f} km/h)")
+        
         # 打印输出目录
         print(f"\n可视化输出目录: {self.output_dir}")
         
@@ -460,6 +526,15 @@ class AllNodes:
             Optional[EnvironmentModel]: 最后一个环境模型
         """
         return self._last_env_model
+    
+    def get_all_violations(self) -> List[Violation]:
+        """
+        获取所有违规记录
+        
+        Returns:
+            List[Violation]: 违规列表
+        """
+        return self._all_violations
 
 
 def main():
