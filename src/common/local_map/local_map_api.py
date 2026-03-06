@@ -998,6 +998,7 @@ class LocalMapAPI:
         show_road_ids: bool = True,
         ego_points: Optional[List[Point3D]] = None,
         trajectory_points: Optional[List[Point3D]] = None,
+        ego_lane_id: Optional[int] = None,
         save_path: Optional[str] = None,
         dpi: int = 100
     ) -> None:
@@ -1014,6 +1015,7 @@ class LocalMapAPI:
             show_road_ids: 是否显示Road ID标签 / Whether to show Road ID labels
             ego_points: 自车测试点列表 / List of ego test points to mark
             trajectory_points: 轨迹点列表 / List of trajectory points to plot as a connected path
+            ego_lane_id: 自车所在车道ID / Lane ID to highlight as ego's current lane
             save_path: 保存路径 / Path to save figure (optional)
             dpi: 保存图片的DPI / DPI for saved figure
         """
@@ -1039,6 +1041,7 @@ class LocalMapAPI:
             show_road_ids=show_road_ids,
             ego_points=ego_points,
             trajectory_points=trajectory_points,
+            ego_lane_id=ego_lane_id,
             save_path=save_path,
             dpi=dpi
         )

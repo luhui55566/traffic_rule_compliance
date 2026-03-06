@@ -152,6 +152,12 @@ class LocalMapProcessor:
             if not lane.centerline_points:
                 continue
             
+            # 检查车道类型是否为可通行类型（只考虑DRIVING类型的车道）
+            from common.local_map.local_map_data import LaneType
+            if lane.lane_type != LaneType.DRIVING:
+                logger.debug(f"跳过非行驶车道: lane_id={lane.lane_id}, type={lane.lane_type.name}")
+                continue
+            
             # 获取车道边界点（提前获取，用于快速过滤）
             left_boundary_points = self._get_boundary_points(lane.left_boundary_segment_indices, local_map)
             right_boundary_points = self._get_boundary_points(lane.right_boundary_segment_indices, local_map)

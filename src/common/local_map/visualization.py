@@ -65,6 +65,7 @@ class LocalMapVisualizer:
         show_lane_ids: bool = True,
         ego_points: Optional[List[Point3D]] = None,
         trajectory_points: Optional[List[Point3D]] = None,
+        ego_lane_id: Optional[int] = None,
         save_path: Optional[str] = None,
         dpi: int = 100
     ) -> None:
@@ -82,6 +83,7 @@ class LocalMapVisualizer:
             show_lane_ids: Whether to show Lane ID labels on each lane (smaller font)
             ego_points: List of ego test points to mark
             trajectory_points: List of trajectory points to plot as a connected path
+            ego_lane_id: Lane ID to highlight as ego's current lane
             save_path: Path to save figure (optional)
             dpi: DPI for saved figure
         """
@@ -114,6 +116,10 @@ class LocalMapVisualizer:
         # Plot trajectory
         if trajectory_points:
             self._plot_trajectory(trajectory_points)
+
+        # Plot ego lane highlight
+        if ego_lane_id is not None:
+            self._plot_ego_lane_highlight(local_map, ego_lane_id)
 
         # Plot Road ID labels
         if show_road_ids:
@@ -687,6 +693,72 @@ class LocalMapVisualizer:
         # Mark end point (red)
         self.ax.scatter(x_coords[-1], y_coords[-1], c='red', s=80, marker='s',
                        edgecolors='white', linewidths=2, zorder=5, label='End')
+
+    def _plot_ego_lane_highlight(self, local_map: LocalMap, ego_lane_id: int) -> None:
+        """Highlight the ego lane with a semi-transparent fill.
+        
+        Args:
+            local_map: LocalMap object containing lane data
+            ego_lane_id: Lane ID to highlight
+        """
+        import numpy as np
+        from matplotlib.patches import Polygon
+        
+        # Find the ego lane
+        ego_lane = None
+        for lane in local_map.lanes:
+            if lane.lane_id == ego_lane_id:
+                ego_lane = lane
+                break
+        
+        if ego_lane is None:
+            logger.debug(f"Ego lane {ego_lane_id} not found for highlighting")
+            return
+        
+        # Get left and right boundary points to create a polygon
+        left_points = []
+        right_points = []
+        
+        # Get boundary points from boundary segments
+        for idx in ego_lane.left_boundary_segment_indices:
+            if idx < len(local_map.boundary_segments):
+                seg = local_map.boundary_segments[idx]
+                for pt in seg.boundary_points:
+                    left_points.append((pt.x, pt.y))
+        
+        for idx in ego_lane.right_boundary_segment_indices:
+            if idx < len(local_map.boundary_segments):
+                seg = local_map.boundary_segments[idx]
+                for pt in seg.boundary_points:
+                    right_points.append((pt.x, pt.y))
+        
+        # If we have both boundaries, create a polygon
+        if left_points and right_points:
+            # Combine left boundary (forward) + right boundary (reverse) to form closed polygon
+            polygon_points = left_points + list(reversed(right_points))
+            
+            # Create and add the polygon
+            polygon = Polygon(
+                polygon_points,
+                closed=True,
+                facecolor='yellow',
+                edgecolor='none',
+                alpha=0.3,  # Semi-transparent
+                label='Ego Lane',
+                zorder=1  # Behind other elements
+            )
+            self.ax.add_patch(polygon)
+            logger.debug(f"Highlighted ego lane {ego_lane_id} with {len(polygon_points)} polygon points")
+        else:
+            # Fallback: highlight using centerline if boundaries not available
+            if ego_lane.centerline_points:
+                centerline = [(p.x, p.y) for p in ego_lane.centerline_points]
+                if len(centerline) >= 2:
+                    # Draw a thick highlighted line along centerline
+                    xs, ys = zip(*centerline)
+                    self.ax.plot(xs, ys, color='yellow', linewidth=8, alpha=0.3,
+                               solid_capstyle='round', zorder=1)
+                    logger.debug(f"Highlighted ego lane {ego_lane_id} centerline")
 
     def _add_legend(
         self,

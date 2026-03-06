@@ -391,12 +391,23 @@ class AllNodes:
             else:
                 local_str = "Local: N/A"
             
+            # 获取自车车道信息
+            ego_lane_id = None
+            ego_lane_str = "Ego Lane: N/A"
+            if env_model.ego_lane_info and env_model.ego_lane_info.lane_id is not None:
+                ego_lane_id = env_model.ego_lane_info.lane_id
+                lane_info = env_model.ego_lane_info
+                containment = lane_info.containment_type.name
+                dist_center = lane_info.distance_to_centerline
+                ego_lane_str = f"Ego Lane: {ego_lane_id} ({containment}, dist={dist_center:.2f}m)"
+            
             # 可视化
             api.visualize(
                 title=f"Local Map - Frame {frame_index}\n"
                       f"{gps_str}\n"
                       f"{speed_str}\n"
                       f"{local_str}\n"
+                      f"{ego_lane_str}\n"
                       f"Trajectory: {len(trajectory_points)} points",
                 show_lanes=True,
                 show_centerlines=True,
@@ -405,6 +416,7 @@ class AllNodes:
                 show_road_ids=True,
                 ego_points=[Point3D(x=0.0, y=0.0, z=0.0)],  # 自车在原点
                 trajectory_points=trajectory_points,  # 使用env_node的轨迹
+                ego_lane_id=ego_lane_id,  # 自车车道ID用于高亮
                 save_path=str(output_path),
                 dpi=150
             )
