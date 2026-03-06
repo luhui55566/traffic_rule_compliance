@@ -46,6 +46,10 @@ class XODRMapConverter:
         """
         self.transformer = transformer
         self.config = config or ConversionConfig()
+        
+        # 点采样最小间隔（米）- 用于减少密集点集，提高单峰搜索算法稳定性
+        # 统一使用 eps 作为采样间隔（默认1m，与MapNode中的eps保持一致）
+        self.point_sample_interval = self.config.eps
 
         # 映射表：(road_id, lane_section_s0, original_lane_id) -> local_lane_id
         self.lane_id_mapping: Dict[Tuple[int, float, int], int] = {}
@@ -62,6 +66,42 @@ class XODRMapConverter:
         # Cache for road and junction objects
         self._roads: Dict[int, Road] = {}
         self._junctions: Dict[int, Junction] = {}
+    
+    def _resample_points(self, points: List[Point3D], min_interval: float = None) -> List[Point3D]:
+        """
+        对点集进行间隔采样，去除过于密集的点
+        
+        Args:
+            points: 原始点集
+            min_interval: 最小间隔距离（米），默认使用 self.point_sample_interval
+            
+        Returns:
+            List[Point3D]: 采样后的点集
+        """
+        if min_interval is None:
+            min_interval = self.point_sample_interval
+            
+        if not points or len(points) <= 2:
+            return points
+        
+        resampled = [points[0]]  # 保留第一个点
+        accumulated_dist = 0.0
+        
+        for i in range(1, len(points)):
+            prev = resampled[-1]
+            curr = points[i]
+            dist = math.sqrt((curr.x - prev.x)**2 + (curr.y - prev.y)**2)
+            accumulated_dist += dist
+            
+            if accumulated_dist >= min_interval:
+                resampled.append(curr)
+                accumulated_dist = 0.0
+        
+        # 确保最后一个点被保留（如果距离上一个采样点足够远）
+        if accumulated_dist > min_interval * 0.5 and len(points) > 1:
+            resampled.append(points[-1])
+        
+        return resampled
     
     def generate_lane_id(self, road_id: int, lanesection_s0: float, lane_id: int) -> int:
         """
@@ -1356,8 +1396,11 @@ class XODRMapConverter:
                     if clipped_boundary:
                         boundary_points = clipped_boundary
                     else:
-                        return None  # All points were outside range
-            
+                        return None
+                    
+            # Apply resampling to reduce dense points
+            if boundary_points:
+                boundary_points = self._resample_points(boundary_points, self.point_sample_interval)
             # Extract roadmark properties using get_roadmarks() and roadmark_groups
             # RoadMark has type, s_start, s_end, width, group_s0
             # RoadMarkGroup has type, color, weight, material, etc.

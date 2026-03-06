@@ -159,14 +159,24 @@ class SpeedLimitRule(StatefulTrafficRule):
                 self.update_state('overspeed_start_frame', current_frame)
                 self.update_state('max_overspeed', overspeed)
                 self.update_state('overspeed_start_speed', current_speed)
+                # 记录开始时刻的自车状态快照
+                self.update_state('start_snapshot', self._create_snapshot(env_model, current_speed))
+                # 初始化峰值快照（开始时就是峰值）
+                self.update_state('peak_snapshot', self._create_snapshot(env_model, current_speed))
+                self.update_state('max_speed_frame', current_frame)
             else:
                 # 继续超速，更新最大超速值
                 if overspeed > max_overspeed:
                     self.update_state('max_overspeed', overspeed)
+                    # 更新峰值快照
+                    self.update_state('peak_snapshot', self._create_snapshot(env_model, current_speed))
+                    self.update_state('max_speed_frame', current_frame)
         else:
             # 当前没有超速
             if overspeed_start_time is not None:
                 # 超速结束，判定是否违规
+                # 记录结束时刻的自车状态快照
+                end_snapshot = self._create_snapshot(env_model, current_speed)
                 violation = self._create_violation(
                     env_model,
                     overspeed_start_time,
@@ -174,12 +184,48 @@ class SpeedLimitRule(StatefulTrafficRule):
                     current_time,
                     current_frame,
                     max_overspeed,
-                    speed_limit
+                    speed_limit,
+                    end_snapshot
                 )
                 # 重置状态
                 self._reset_overspeed_state()
         
         return violation
+    
+    def _create_snapshot(self, env_model: EnvironmentModel, current_speed: float) -> Dict[str, Any]:
+        """
+        创建自车状态快照
+        
+        Args:
+            env_model: 环境模型
+            current_speed: 当前速度（m/s）
+            
+        Returns:
+            Dict: 快照信息
+        """
+        ego_state = env_model.ego_state
+        snapshot = {
+            'frame_index': env_model.frame_index,
+            'timestamp': env_model.timestamp,
+            'speed': current_speed,  # m/s
+            'speed_kmh': current_speed * 3.6,  # km/h
+        }
+        
+        # 添加GPS位置信息
+        if ego_state and ego_state.global_state and ego_state.global_state.position:
+            pos = ego_state.global_state.position
+            snapshot['latitude'] = pos.latitude
+            snapshot['longitude'] = pos.longitude
+            snapshot['altitude'] = pos.altitude
+        
+        # 添加局部坐标信息
+        if ego_state and ego_state.local_state:
+            local_pos = ego_state.local_state.position
+            snapshot['local_x'] = local_pos.x
+            snapshot['local_y'] = local_pos.y
+            snapshot['local_z'] = local_pos.z
+        
+        return snapshot
     
     def _create_violation(
         self,
@@ -189,7 +235,8 @@ class SpeedLimitRule(StatefulTrafficRule):
         end_time: float,
         end_frame: int,
         max_overspeed: float,
-        speed_limit: float
+        speed_limit: float,
+        end_snapshot: Dict[str, Any] = None
     ) -> Optional[Violation]:
         """
         根据超速时间段创建违规记录
@@ -202,6 +249,7 @@ class SpeedLimitRule(StatefulTrafficRule):
             end_frame: 超速结束帧
             max_overspeed: 最大超速值（m/s）
             speed_limit: 限速值（m/s）
+            end_snapshot: 结束时刻的自车状态快照
         
         Returns:
             Violation 或 None
@@ -219,7 +267,7 @@ class SpeedLimitRule(StatefulTrafficRule):
         
         # 判定违规等级（综合考虑超速程度和持续时间）
         level, level_str = self._determine_violation_level(
-            overspeed_percentage, 
+            overspeed_percentage,
             duration_seconds
         )
         
@@ -240,6 +288,17 @@ class SpeedLimitRule(StatefulTrafficRule):
             'y': ego_state.local_state.position.y if ego_state.local_state else None,
         }
         
+        # 获取关键时刻的自车状态快照
+        start_snapshot = self.get_state('start_snapshot', {})
+        peak_snapshot = self.get_state('peak_snapshot', {})
+        
+        # 构建关键时刻快照字典
+        key_snapshots = {
+            'start': start_snapshot,
+            'peak': peak_snapshot,
+            'end': end_snapshot or {}
+        }
+        
         return Violation(
             rule_id=self.id,
             rule_name=self.name,
@@ -254,7 +313,9 @@ class SpeedLimitRule(StatefulTrafficRule):
             duration_seconds=duration_seconds,
             start_frame=start_frame,
             end_frame=end_frame,
-            max_overspeed=max_overspeed
+            max_overspeed=max_overspeed,
+            # 关键时刻快照
+            key_snapshots=key_snapshots
         )
     
     def _determine_violation_level(
@@ -295,6 +356,9 @@ class SpeedLimitRule(StatefulTrafficRule):
         self.update_state('overspeed_start_frame', None)
         self.update_state('max_overspeed', 0.0)
         self.update_state('overspeed_start_speed', None)
+        self.update_state('start_snapshot', None)
+        self.update_state('peak_snapshot', None)
+        self.update_state('max_speed_frame', None)
     
     def reset_state(self) -> None:
         """

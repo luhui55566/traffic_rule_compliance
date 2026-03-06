@@ -53,6 +53,20 @@ class Violation:
     distance: Optional[float] = None               # 距离（米）
     position: Optional[Dict[str, float]] = None    # 位置信息
     
+    # 时间段信息（用于超速等持续型违规）
+    duration_seconds: Optional[float] = None       # 持续时间（秒）
+    start_frame: Optional[int] = None              # 开始帧索引
+    end_frame: Optional[int] = None                # 结束帧索引
+    max_overspeed: Optional[float] = None          # 最大超速量（m/s）
+    
+    # 关键时刻的自车状态快照（用于详细输出）
+    # 格式: {'start': {...}, 'peak': {...}, 'end': {...}}
+    # 每个快照包含: frame_index, timestamp, latitude, longitude, speed等
+    key_snapshots: Optional[Dict[str, Dict[str, Any]]] = None
+    
+    # 详细信息（用于存储规则特定的详细信息）
+    details: Optional[Dict[str, Any]] = None       # 详细信息字典
+    
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
         result = {
@@ -72,6 +86,24 @@ class Violation:
             result['distance'] = self.distance
         if self.position is not None:
             result['position'] = self.position
+        
+        # 时间段信息
+        if self.duration_seconds is not None:
+            result['duration_seconds'] = self.duration_seconds
+        if self.start_frame is not None:
+            result['start_frame'] = self.start_frame
+        if self.end_frame is not None:
+            result['end_frame'] = self.end_frame
+        if self.max_overspeed is not None:
+            result['max_overspeed'] = self.max_overspeed
+        
+        # 关键时刻快照
+        if self.key_snapshots is not None:
+            result['key_snapshots'] = self.key_snapshots
+        
+        # 详细信息
+        if self.details is not None:
+            result['details'] = self.details
             
         return result
     

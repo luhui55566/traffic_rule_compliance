@@ -62,7 +62,7 @@ class AllNodes:
     """
     
     # 局部地图可视化间隔（每N帧生成一次可视化）
-    VISUALIZATION_INTERVAL = 25
+    VISUALIZATION_INTERVAL = 1000
     
     # 轨迹可视范围（米）
     TRAJECTORY_RANGE = 300.0
@@ -459,6 +459,14 @@ class AllNodes:
                     print(f"     时间: {v.timestamp:.2f}s, 帧: {v.frame_index}")
                     if v.speed is not None:
                         print(f"     速度: {v.speed*3.6:.1f} km/h (限速: {v.speed_limit*3.6:.1f} km/h)")
+                    
+                    # 输出关键时刻快照信息
+                    if v.key_snapshots:
+                        self._print_key_snapshots(v)
+                    
+                    # 输出连续变道详细信息
+                    if v.details and 'lane_changes' in v.details:
+                        self._print_lane_change_details(v)
         
         # 打印输出目录
         print(f"\n可视化输出目录: {self.output_dir}")
@@ -529,6 +537,83 @@ class AllNodes:
             EnvNode: 环境模型节点实例
         """
         return self.env_node
+    
+    def _format_timestamp(self, timestamp: float) -> str:
+        """
+        将Unix时间戳转换为可读的日期时间字符串
+        
+        Args:
+            timestamp: Unix时间戳（秒）
+            
+        Returns:
+            str: 格式化的日期时间字符串
+        """
+        try:
+            dt = datetime.fromtimestamp(timestamp)
+            return dt.strftime('%Y-%m-%d %H:%M:%S')
+        except (OSError, OverflowError, ValueError):
+            return f"无效时间戳({timestamp:.2f})"
+    
+    def _print_key_snapshots(self, violation: Violation):
+        """
+        打印违规的关键时刻快照信息
+        
+        Args:
+            violation: 违规记录
+        """
+        snapshots = violation.key_snapshots
+        
+        # 打印开始时刻信息
+        if 'start' in snapshots and snapshots['start']:
+            start = snapshots['start']
+            print(f"     [开始时刻]")
+            print(f"       帧: {start.get('frame_index', 'N/A')}")
+            print(f"       时间: {self._format_timestamp(start.get('timestamp', 0))}")
+            if 'latitude' in start and 'longitude' in start:
+                print(f"       位置: ({start['latitude']:.6f}, {start['longitude']:.6f})")
+            if 'speed_kmh' in start:
+                print(f"       速度: {start['speed_kmh']:.1f} km/h")
+        
+        # 打印峰值时刻信息（最高速度）
+        if 'peak' in snapshots and snapshots['peak']:
+            peak = snapshots['peak']
+            print(f"     [最高速度时刻]")
+            print(f"       帧: {peak.get('frame_index', 'N/A')}")
+            print(f"       时间: {self._format_timestamp(peak.get('timestamp', 0))}")
+            if 'latitude' in peak and 'longitude' in peak:
+                print(f"       位置: ({peak['latitude']:.6f}, {peak['longitude']:.6f})")
+            if 'speed_kmh' in peak:
+                print(f"       速度: {peak['speed_kmh']:.1f} km/h")
+        
+        # 打印结束时刻信息
+        if 'end' in snapshots and snapshots['end']:
+            end = snapshots['end']
+            print(f"     [结束时刻]")
+            print(f"       帧: {end.get('frame_index', 'N/A')}")
+            print(f"       时间: {self._format_timestamp(end.get('timestamp', 0))}")
+            if 'latitude' in end and 'longitude' in end:
+                print(f"       位置: ({end['latitude']:.6f}, {end['longitude']:.6f})")
+            if 'speed_kmh' in end:
+                print(f"       速度: {end['speed_kmh']:.1f} km/h")
+    
+    def _print_lane_change_details(self, violation: Violation):
+        """
+        打印连续变道的详细信息
+        
+        Args:
+            violation: 违规记录
+        """
+        lane_changes = violation.details.get('lane_changes', [])
+        for i, lc in enumerate(lane_changes):
+            seq = lc.get('sequence', i + 1)
+            print(f"     [第{seq}次变道]")
+            print(f"       帧: {lc.get('frame_index', 'N/A')}")
+            print(f"       时间: {self._format_timestamp(lc.get('timestamp', 0))}")
+            if 'latitude' in lc and 'longitude' in lc:
+                print(f"       位置: ({lc['latitude']:.6f}, {lc['longitude']:.6f})")
+            if 'direction' in lc:
+                direction_str = "向左" if lc['direction'] == 'left' else "向右" if lc['direction'] == 'right' else "未知"
+                print(f"       方向: {direction_str}")
     
     def get_last_env_model(self) -> Optional[EnvironmentModel]:
         """

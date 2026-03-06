@@ -316,7 +316,10 @@ class LocalMapProcessor:
         right_boundary: List[Point3D]
     ) -> Tuple[float, float]:
         """
-        计算自车到左右边界的距离
+        计算自车到左右边界的距离（到边界线段的垂直距离）
+        
+        改进：使用点到线段的距离，而不是点到点的距离，
+        这样即使边界点稀疏（3-5米间距）也能准确计算距离。
         
         Args:
             ego_pos: 自车位置
@@ -329,7 +332,18 @@ class LocalMapProcessor:
         dist_to_left = float('inf')
         dist_to_right = float('inf')
         
-        if left_boundary:
+        if left_boundary and len(left_boundary) >= 2:
+            min_dist = float('inf')
+            # 计算到每条边界线段的距离
+            for i in range(len(left_boundary) - 1):
+                dist = self._point_to_segment_distance(
+                    ego_pos, left_boundary[i], left_boundary[i + 1]
+                )
+                if dist < min_dist:
+                    min_dist = dist
+            dist_to_left = min_dist
+        elif left_boundary:
+            # 只有一个点的情况，退化为点到点距离
             min_dist = float('inf')
             for pt in left_boundary:
                 dist = math.sqrt((ego_pos.x - pt.x)**2 + (ego_pos.y - pt.y)**2)
@@ -337,7 +351,18 @@ class LocalMapProcessor:
                     min_dist = dist
             dist_to_left = min_dist
         
-        if right_boundary:
+        if right_boundary and len(right_boundary) >= 2:
+            min_dist = float('inf')
+            # 计算到每条边界线段的距离
+            for i in range(len(right_boundary) - 1):
+                dist = self._point_to_segment_distance(
+                    ego_pos, right_boundary[i], right_boundary[i + 1]
+                )
+                if dist < min_dist:
+                    min_dist = dist
+            dist_to_right = min_dist
+        elif right_boundary:
+            # 只有一个点的情况，退化为点到点距离
             min_dist = float('inf')
             for pt in right_boundary:
                 dist = math.sqrt((ego_pos.x - pt.x)**2 + (ego_pos.y - pt.y)**2)
@@ -346,6 +371,45 @@ class LocalMapProcessor:
             dist_to_right = min_dist
         
         return dist_to_left, dist_to_right
+    
+    def _point_to_segment_distance(
+        self,
+        point: Point3D,
+        seg_start: Point3D,
+        seg_end: Point3D
+    ) -> float:
+        """
+        计算点到线段的最短距离
+        
+        Args:
+            point: 待计算的点
+            seg_start: 线段起点
+            seg_end: 线段终点
+            
+        Returns:
+            float: 点到线段的最短距离
+        """
+        # 线段向量
+        dx = seg_end.x - seg_start.x
+        dy = seg_end.y - seg_start.y
+        
+        # 线段长度的平方
+        seg_len_sq = dx * dx + dy * dy
+        
+        if seg_len_sq < 1e-10:
+            # 线段退化为点
+            return math.sqrt((point.x - seg_start.x)**2 + (point.y - seg_start.y)**2)
+        
+        # 计算投影参数 t（0表示在起点，1表示在终点）
+        t = ((point.x - seg_start.x) * dx + (point.y - seg_start.y) * dy) / seg_len_sq
+        t = max(0, min(1, t))  # 限制在 [0, 1] 范围内
+        
+        # 计算投影点
+        proj_x = seg_start.x + t * dx
+        proj_y = seg_start.y + t * dy
+        
+        # 返回点到投影点的距离
+        return math.sqrt((point.x - proj_x)**2 + (point.y - proj_y)**2)
     
     def _check_containment(
         self,
@@ -434,7 +498,10 @@ class LocalMapProcessor:
         """
         检查点是否在车道边界内（优化版）
         
-        使用点到折线距离的方法，分别计算到左右边界的最短距离
+        使用叉积方法判断点是否在左右边界之间：
+        1. 找到距离点最近的边界线段
+        2. 使用叉积判断点是否在边界的正确一侧
+        3. 点必须在左边界右侧且在右边界左侧才算在车道内
         
         Args:
             point: 待检查的点
@@ -447,13 +514,94 @@ class LocalMapProcessor:
         if not left_boundary or not right_boundary:
             return False
         
+        # 找到左边界上距离点最近的线段
+        # 确保线段的两个端点不重合
+        left_min_idx = self._find_closest_point_idx(point, left_boundary)
+        if left_min_idx == 0:
+            # 最近点是第一个点，使用第一条线段 [0, 1]
+            left_segment_start = 0
+            left_segment_end = min(1, len(left_boundary) - 1)
+        elif left_min_idx == len(left_boundary) - 1:
+            # 最近点是最后一个点，使用最后一条线段 [n-2, n-1]
+            left_segment_start = max(0, len(left_boundary) - 2)
+            left_segment_end = len(left_boundary) - 1
+        else:
+            # 使用包含最近点的线段 [min_idx-1, min_idx] 或 [min_idx, min_idx+1]
+            # 选择距离更近的线段
+            left_segment_start = left_min_idx
+            left_segment_end = left_min_idx + 1
+        
+        # 找到右边界上距离点最近的线段
+        right_min_idx = self._find_closest_point_idx(point, right_boundary)
+        if right_min_idx == 0:
+            right_segment_start = 0
+            right_segment_end = min(1, len(right_boundary) - 1)
+        elif right_min_idx == len(right_boundary) - 1:
+            right_segment_start = max(0, len(right_boundary) - 2)
+            right_segment_end = len(right_boundary) - 1
+        else:
+            right_segment_start = right_min_idx
+            right_segment_end = right_min_idx + 1
+        
+        # 计算点相对于左边界线段的位置
+        left_p1 = left_boundary[left_segment_start]
+        left_p2 = left_boundary[left_segment_end]
+        left_cross = self._cross_product(left_p1, left_p2, point)
+        
+        # 计算点相对于右边界线段的位置
+        right_p1 = right_boundary[right_segment_start]
+        right_p2 = right_boundary[right_segment_end]
+        right_cross = self._cross_product(right_p1, right_p2, point)
+        
         # 计算到左边界和右边界的最短距离
         min_dist_left = self._point_to_polyline_distance_optimized(point, left_boundary)
         min_dist_right = self._point_to_polyline_distance_optimized(point, right_boundary)
         
-        # 判定：如果到两个边界的距离都小于阈值，认为在边界内
-        # 阈值设为5米（可根据实际需求调整）
-        return min_dist_left < 5.0 and min_dist_right < 5.0
+        # 计算左右边界之间的近似宽度（在最近点处）
+        left_closest_pt = left_boundary[left_min_idx]
+        right_closest_pt = right_boundary[right_min_idx]
+        lane_width_estimate = math.sqrt(
+            (left_closest_pt.x - right_closest_pt.x)**2 +
+            (left_closest_pt.y - right_closest_pt.y)**2
+        )
+        
+        # 判定逻辑：
+        # 1. 点到两个边界的距离之和应该小于等于车道宽度（允许一定误差）
+        dist_sum = min_dist_left + min_dist_right
+        width_tolerance = 0.5  # 0.5米容差
+        is_between_boundaries = dist_sum <= lane_width_estimate + width_tolerance
+        
+        # 2. 使用叉积确认点在边界之间
+        # 如果叉积符号相反，说明点在两个边界之间
+        cross_product_check = (left_cross > 0 and right_cross < 0) or (left_cross < 0 and right_cross > 0)
+        
+        result = is_between_boundaries and cross_product_check
+        
+        return result
+    
+    def _cross_product(
+        self,
+        p1: Point3D,
+        p2: Point3D,
+        p3: Point3D
+    ) -> float:
+        """
+        计算向量 p1->p2 和 p1->p3 的叉积
+        
+        叉积结果：
+        - 正值：p3 在 p1->p2 的左侧
+        - 负值：p3 在 p1->p2 的右侧
+        - 零：三点共线
+        
+        Args:
+            p1: 线段起点
+            p2: 线段终点
+            p3: 待判断的点
+            
+        Returns:
+            float: 叉积值
+        """
+        return (p2.x - p1.x) * (p3.y - p1.y) - (p2.y - p1.y) * (p3.x - p1.x)
     
     def _point_to_polyline_distance_optimized(
         self, 

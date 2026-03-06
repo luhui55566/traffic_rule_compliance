@@ -429,6 +429,10 @@ class LocalMapConstructor:
         left_boundary_indices = []
         right_boundary_indices = []
         
+        # Determine if ego is traveling in reverse direction relative to road reference line
+        # This affects the left/right boundary assignment
+        is_reverse_direction = self._is_reverse_direction(odr_road, lanesection_s0, lanesection_end)
+        
         # Extract both inner and outer boundaries for each lane
         # In XODR, each lane has two boundaries: inner (closer to road center) and outer (farther from road center)
         
@@ -447,9 +451,26 @@ class LocalMapConstructor:
                 # Add to builder
                 if self.builder.add_boundary_segment(boundary_segment):
                     # Determine if this is left or right boundary based on lane ID and inner/outer
-                    # For right-side lanes (positive ID): left = inner, right = outer
-                    # For left-side lanes (negative ID): left = outer, right = inner
-                    is_left_boundary = (lane_id < 0) == is_outer
+                    # XODR standard:
+                    #   - lane_id > 0: left-side lanes (when looking in direction of increasing s)
+                    #   - lane_id < 0: right-side lanes (when looking in direction of increasing s)
+                    #
+                    # For left-side lanes (lane_id > 0):
+                    #   - inner boundary is closer to reference line (on the RIGHT side of the lane)
+                    #   - outer boundary is farther from reference line (on the LEFT side of the lane)
+                    #   - So: left_boundary = outer, right_boundary = inner
+                    #
+                    # For right-side lanes (lane_id < 0):
+                    #   - inner boundary is closer to reference line (on the LEFT side of the lane)
+                    #   - outer boundary is farther from reference line (on the RIGHT side of the lane)
+                    #   - So: left_boundary = inner, right_boundary = outer
+                    #
+                    # When ego travels in reverse direction, left and right are swapped
+                    is_left_boundary = (lane_id > 0) == is_outer
+                    
+                    # Swap left/right if ego is traveling in reverse direction
+                    if is_reverse_direction:
+                        is_left_boundary = not is_left_boundary
                     
                     if is_left_boundary:
                         left_boundary_indices.append(boundary_segment.segment_id)
@@ -458,6 +479,73 @@ class LocalMapConstructor:
         
         # Associate boundaries with lane
         self.builder.associate_lane_with_boundaries(lane, left_boundary_indices, right_boundary_indices)
+    
+    def _is_reverse_direction(
+        self,
+        odr_road,
+        lanesection_s0: float,
+        lanesection_end: float
+    ) -> bool:
+        """
+        Determine if ego vehicle is traveling in reverse direction relative to road reference line.
+        
+        When ego heading is opposite to road reference line direction (s increasing direction),
+        the left/right boundaries need to be swapped from ego's perspective.
+        
+        Args:
+            odr_road: pyOpenDRIVE Road object
+            lanesection_s0: Lane section start s coordinate
+            lanesection_end: Lane section end s coordinate
+            
+        Returns:
+            True if ego is traveling in reverse direction, False otherwise
+        """
+        import math
+        
+        # Get ego heading from config
+        ego_heading = self.config.ego_heading
+        
+        # Get road direction at the middle of the lane section
+        mid_s = (lanesection_s0 + lanesection_end) / 2.0
+        
+        try:
+            # Get road direction (heading) at mid_s
+            # Road direction is the tangent direction at s (direction of increasing s)
+            delta_s = 1.0  # 1 meter delta for tangent calculation
+            
+            if mid_s + delta_s <= odr_road.length:
+                pos_ahead = odr_road.get_xyz(mid_s + delta_s, 0.0, 0.0)
+                pos = odr_road.get_xyz(mid_s, 0.0, 0.0)
+                road_heading = math.atan2(
+                    pos_ahead.array[1] - pos.array[1],
+                    pos_ahead.array[0] - pos.array[0]
+                )
+            else:
+                # Use backward difference if near end of road
+                pos = odr_road.get_xyz(mid_s, 0.0, 0.0)
+                pos_behind = odr_road.get_xyz(mid_s - delta_s, 0.0, 0.0)
+                road_heading = math.atan2(
+                    pos.array[1] - pos_behind.array[1],
+                    pos.array[0] - pos_behind.array[0]
+                )
+            
+            # Calculate angular difference between ego heading and road heading
+            # Normalize to [-pi, pi]
+            angle_diff = ego_heading - road_heading
+            while angle_diff > math.pi:
+                angle_diff -= 2 * math.pi
+            while angle_diff < -math.pi:
+                angle_diff += 2 * math.pi
+            
+            # If angle difference is close to pi (or -pi), ego is traveling in reverse
+            # Use a threshold of pi/2 (90 degrees) to determine reverse direction
+            is_reverse = abs(angle_diff) > math.pi / 2
+            
+            return is_reverse
+            
+        except Exception as e:
+            logger.warning(f"Failed to determine road direction: {e}, assuming forward direction")
+            return False
     
     def process_traffic_elements(self) -> None:
         """Process traffic elements (signals, objects) from the loaded XODR map."""

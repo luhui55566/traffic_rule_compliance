@@ -115,7 +115,7 @@ class CoordinateConverter:
         # 时间戳转换：veh_status的timestamp通常是纳秒级，需要转换为秒
         timestamp = float(veh_ego_state.timestamp)
         if timestamp > 1e12:  # 纳秒级时间戳
-            timestamp = timestamp / 1e9
+            timestamp = timestamp / 1e6
         
         common_ego_state = CommonEgoVehicleState(
             timestamp=timestamp,

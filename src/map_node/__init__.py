@@ -81,7 +81,7 @@ class MapNode:
         
         # 默认配置
         self._map_range = 300.0  # 局部地图范围（米）
-        self._eps = 0.5  # 采样分辨率（米）
+        self._eps = 1.0  # 采样分辨率（米），统一使用1米
         
         logger.info(f"MapNode初始化: format={self._map_format}")
     
